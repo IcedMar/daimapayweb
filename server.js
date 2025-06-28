@@ -20,8 +20,9 @@ const firestore = new Firestore({
   keyFilename: process.env.GCP_KEY_FILE, // service account key JSON
 });
 
-const cors = require('cors');
-app.use(cors());
+app.use(cors({
+  origin: 'https://daima-pay-portal.onrender.com'
+}));
 
 
 const txCollection = firestore.collection('transactions');
