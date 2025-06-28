@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -19,6 +18,8 @@ const firestore = new Firestore({
   projectId: process.env.GCP_PROJECT_ID,
   keyFilename: process.env.GCP_KEY_FILE, // service account key JSON
 });
+
+const cors = require('cors');
 
 app.use(cors({
   origin: 'https://daima-pay-portal.onrender.com'
