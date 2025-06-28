@@ -20,6 +20,10 @@ const firestore = new Firestore({
   keyFilename: process.env.GCP_KEY_FILE, // service account key JSON
 });
 
+const cors = require('cors');
+app.use(cors());
+
+
 const txCollection = firestore.collection('transactions');
 
 app.use(bodyParser.json());
