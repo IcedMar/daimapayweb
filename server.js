@@ -7,34 +7,41 @@ const africastalking = require('africastalking')({
   username: process.env.AT_USERNAME,
 });
 const { Firestore } = require('@google-cloud/firestore');
+const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // === === === === === === === === === ===
-// Firestore setup
+// ✅ Firestore setup
 // === === === === === === === === === ===
 const firestore = new Firestore({
   projectId: process.env.GCP_PROJECT_ID,
-  keyFilename: process.env.GCP_KEY_FILE, // service account key JSON
+  keyFilename: process.env.GCP_KEY_FILE,
 });
 
-const cors = require('cors');
+const txCollection = firestore.collection('transactions');
 
+// === === === === === === === === === ===
+// ✅ CORS setup
+// === === === === === === === === === ===
 const corsOptions = {
   origin: 'https://daima-pay-portal.onrender.com',
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
 };
+
 app.use(cors(corsOptions));
+// ✅ Ensure preflight requests are handled too
 app.options('*', cors(corsOptions));
 
-const txCollection = firestore.collection('transactions');
-
+// === === === === === === === === === ===
+// ✅ Middlewares
+// === === === === === === === === === ===
 app.use(bodyParser.json());
 
 // === === === === === === === === === ===
-// 1️⃣ POST /pay: Initiate M-PESA STK Push
+// ✅ POST /pay: Initiate M-PESA STK Push
 // === === === === === === === === === ===
 app.post('/pay', async (req, res) => {
   const { topupNumber, amount, mpesaNumber } = req.body;
@@ -44,8 +51,9 @@ app.post('/pay', async (req, res) => {
   }
 
   try {
-    // Get Daraja Access Token
-    const auth = Buffer.from(`${process.env.DARAJA_CONSUMER_KEY}:${process.env.DARAJA_CONSUMER_SECRET}`).toString('base64');
+    const auth = Buffer.from(
+      `${process.env.DARAJA_CONSUMER_KEY}:${process.env.DARAJA_CONSUMER_SECRET}`
+    ).toString('base64');
 
     const authResponse = await axios.get(
       'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
@@ -56,9 +64,10 @@ app.post('/pay', async (req, res) => {
 
     const access_token = authResponse.data.access_token;
 
-    // Prepare STK push payload
     const timestamp = new Date().toISOString().replace(/[-T:.Z]/g, '').slice(0, 14);
-    const password = Buffer.from(`${process.env.BUSINESS_SHORTCODE}${process.env.DARAJA_PASSKEY}${timestamp}`).toString('base64');
+    const password = Buffer.from(
+      `${process.env.BUSINESS_SHORTCODE}${process.env.DARAJA_PASSKEY}${timestamp}`
+    ).toString('base64');
 
     const stkPushPayload = {
       BusinessShortCode: process.env.BUSINESS_SHORTCODE,
@@ -71,7 +80,7 @@ app.post('/pay', async (req, res) => {
       PhoneNumber: mpesaNumber,
       CallBackURL: `${process.env.BASE_URL}/stk-callback`,
       AccountReference: 'DaimaPay',
-      TransactionDesc: 'Airtime Purchase'
+      TransactionDesc: 'Airtime Purchase',
     };
 
     const stkResponse = await axios.post(
@@ -86,7 +95,6 @@ app.post('/pay', async (req, res) => {
 
     console.log('✅ STK Push Response:', stkResponse.data);
 
-    // ✅ Save transaction to Firestore
     await txCollection.doc(stkResponse.data.CheckoutRequestID).set({
       topupNumber: topupNumber,
       amount: amount,
@@ -109,7 +117,7 @@ app.post('/pay', async (req, res) => {
 });
 
 // === === === === === === === === === ===
-// 2️⃣ POST /stk-callback: Safaricom Callback
+// ✅ POST /stk-callback: Safaricom Callback
 // === === === === === === === === === ===
 app.post('/stk-callback', async (req, res) => {
   const callback = req.body;
@@ -123,7 +131,6 @@ app.post('/stk-callback', async (req, res) => {
     const metadata = callback.Body.stkCallback.CallbackMetadata;
     const amount = metadata.Item.find(i => i.Name === 'Amount').Value;
 
-    // ✅ Look up the transaction in Firestore
     const txDoc = await txCollection.doc(checkoutRequestID).get();
 
     if (!txDoc.exists) {
@@ -132,7 +139,6 @@ app.post('/stk-callback', async (req, res) => {
     }
 
     const txData = txDoc.data();
-
     const topupNumber = txData.topupNumber;
 
     console.log('✅ Found transaction. Sending airtime to:', topupNumber);
@@ -144,7 +150,6 @@ app.post('/stk-callback', async (req, res) => {
 
       console.log('✅ Airtime sent:', response);
 
-      // ✅ Update Firestore status
       await txCollection.doc(checkoutRequestID).update({
         status: 'COMPLETED',
         completedAt: new Date().toISOString(),
@@ -165,7 +170,6 @@ app.post('/stk-callback', async (req, res) => {
     });
   }
 
-  // Always respond 200 to Safaricom!
   res.json({ resultCode: 0, resultDesc: 'Received' });
 });
 
