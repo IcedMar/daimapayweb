@@ -21,10 +21,13 @@ const firestore = new Firestore({
 
 const cors = require('cors');
 
-app.use(cors({
-  origin: 'https://daima-pay-portal.onrender.com'
-}));
-
+const corsOptions = {
+  origin: 'https://daima-pay-portal.onrender.com',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type'],
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 const txCollection = firestore.collection('transactions');
 
