@@ -64,7 +64,7 @@ app.post('/pay', async (req, res) => {
       TransactionType: 'CustomerPayBillOnline',
       Amount: amount,
       PartyA: mpesaNumber,
-      PartyB: process.env.BUSINESS_SHORTCODE,
+      PartyB: process.env.TILL_SHORTCODE,
       PhoneNumber: mpesaNumber,
       CallBackURL: `${process.env.BASE_URL}/stk-callback`,
       AccountReference: 'DaimaPay',
