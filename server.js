@@ -12,9 +12,6 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// === === === === === === === === === ===
-// ✅ Firestore setup
-// === === === === === === === === === ===
 const firestore = new Firestore({
   projectId: process.env.GCP_PROJECT_ID,
   keyFilename: process.env.GCP_KEY_FILE,
@@ -22,9 +19,6 @@ const firestore = new Firestore({
 
 const txCollection = firestore.collection('transactions');
 
-// === === === === === === === === === ===
-// ✅ CORS setup
-// === === === === === === === === === ===
 const corsOptions = {
   origin: 'https://daima-pay-portal.onrender.com',
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -32,17 +26,11 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// ✅ Ensure preflight requests are handled too
+
 app.options('/*splat', cors(corsOptions));
 
-// === === === === === === === === === ===
-// ✅ Middlewares
-// === === === === === === === === === ===
-app.use(bodyParser.json());
+app.use(bodyParser.json()); 
 
-// === === === === === === === === === ===
-// ✅ POST /pay: Initiate M-PESA STK Push
-// === === === === === === === === === ===
 app.post('/pay', async (req, res) => {
   const { topupNumber, amount, mpesaNumber } = req.body;
 
@@ -116,9 +104,6 @@ app.post('/pay', async (req, res) => {
   }
 });
 
-// === === === === === === === === === ===
-// ✅ POST /stk-callback: Safaricom Callback
-// === === === === === === === === === ===
 app.post('/stk-callback', async (req, res) => {
   const callback = req.body;
 
@@ -173,9 +158,6 @@ app.post('/stk-callback', async (req, res) => {
   res.json({ resultCode: 0, resultDesc: 'Received' });
 });
 
-// === === === === === === === === === ===
-// ✅ Health check
-// === === === === === === === === === ===
 app.get('/', (req, res) => {
   res.send('DaimaPay backend is running ✅');
 });
