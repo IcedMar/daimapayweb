@@ -33,7 +33,7 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 // ✅ Ensure preflight requests are handled too
-app.options('/*', cors(corsOptions));
+app.options('/*splat', cors(corsOptions));
 
 // === === === === === === === === === ===
 // ✅ Middlewares
