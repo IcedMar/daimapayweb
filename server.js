@@ -29,6 +29,9 @@ app.use(cors(corsOptions));
 app.options('/*splat', cors(corsOptions));
 app.use(bodyParser.json());
 
+let cachedAirtimeToken = null;
+let tokenExpiryTimestamp = 0;
+
 // Carrier detection helper
 function detectCarrier(phoneNumber) {
   const normalized = phoneNumber.replace(/^(\+254|254)/, '0').trim();
@@ -73,6 +76,62 @@ function detectCarrier(phoneNumber) {
   }
 }
 
+// ✅ Safaricom dealer token
+async function getCachedAirtimeToken() {
+  const now = Date.now();
+  if (cachedAirtimeToken && now < tokenExpiryTimestamp) {
+    console.log('🔑 Using cached dealer token');
+    return cachedAirtimeToken;
+  }
+  const auth = Buffer.from(`${process.env.MPESA_AIRTIME_KEY}:${process.env.MPESA_AIRTIME_SECRET}`).toString('base64');
+  const response = await axios.post(
+    process.env.MPESA_GRANT_URL,
+    {},
+    {
+      headers: {
+        Authorization: `Basic ${auth}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+  const token = response.data.access_token;
+  cachedAirtimeToken = token;
+  tokenExpiryTimestamp = now + 3599 * 1000;
+  return token;
+}
+
+function normalizeReceiverPhoneNumber(num) {
+  return num.replace(/^(\+254|254)/, '0').trim();
+}
+
+// ✅ Send Safaricom dealer airtime
+async function sendSafaricomAirtime(receiverNumber, amount) {
+  const token = await getCachedAirtimeToken();
+  const normalizedReceiver = normalizeReceiverPhoneNumber(receiverNumber);
+  const adjustedAmount = amount * 100;
+
+  const body = {
+    senderMsisdn: process.env.DEALER_SENDER_MSISDN,
+    amount: adjustedAmount,
+    servicePin: process.env.DEALER_SERVICE_PIN, // Or dynamic
+    receiverMsisdn: normalizedReceiver,
+  };
+
+  const response = await axios.post(
+    process.env.MPESA_AIRTIME_URL,
+    body,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  console.log('✅ Safaricom dealer airtime API response:', response.data);
+  return response.data;
+}
+
 // Payment handler
 app.post('/pay', async (req, res) => {
   const { topupNumber, amount, mpesaNumber } = req.body;
@@ -89,7 +148,7 @@ app.post('/pay', async (req, res) => {
   }
 
   try {
-    // 1. Initiate M-Pesa STK push as usual
+    // Initiate M-Pesa STK push as usual
     const auth = Buffer.from(
       `${process.env.DARAJA_CONSUMER_KEY}:${process.env.DARAJA_CONSUMER_SECRET}`
     ).toString('base64');
@@ -175,26 +234,23 @@ app.post('/stk-callback', async (req, res) => {
   const { topupNumber, amount, carrier } = txData;
 
   if (resultCode === 0) {
-    console.log(`✅ Payment success. Carrier: ${carrier}`);
-
+    let airtimeResult;
     try {
       if (carrier === 'Safaricom') {
-        // TODO: integrate your dealer’s Safaricom airtime API here
-        console.log(`🚀 Loading Safaricom airtime to ${topupNumber}`);
-        // Example: await axios.post('https://dealer-api.example/load', { topupNumber, amount });
-
-      } else if (carrier === 'Airtel' || carrier === 'Telkom') {
-        const response = await africastalking.AIRTIME.send({
+        airtimeResult = await sendSafaricomAirtime(topupNumber, amount);
+      } else {
+        airtimeResult = await africastalking.AIRTIME.send({
           recipients: [{ phoneNumber: topupNumber, amount: `KES ${amount}` }],
         });
-        console.log('✅ Airtel/Telkom Airtime sent:', response);
       }
+
+      console.log('✅ Airtime sent:', airtimeResult);
 
       await txCollection.doc(checkoutRequestID).update({
         status: 'COMPLETED',
         completedAt: new Date().toISOString(),
+        airtimeResult: airtimeResult,
       });
-
     } catch (err) {
       console.error('❌ Airtime send failed:', err);
       await txCollection.doc(checkoutRequestID).update({
@@ -203,7 +259,7 @@ app.post('/stk-callback', async (req, res) => {
       });
     }
   } else {
-    console.log('❌ Payment failed or cancelled.');
+    console.log('❌ Payment failed');
     await txCollection.doc(checkoutRequestID).update({
       status: 'FAILED_PAYMENT',
     });
