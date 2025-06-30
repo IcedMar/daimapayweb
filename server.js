@@ -34,7 +34,7 @@ function detectCarrier(phoneNumber) {
   const normalized = phoneNumber.replace(/^(\+254|254)/, '0').trim();
   const prefix3 = normalized.substring(1, 4); // after '0'
   const safaricom = new Set([
-    '110',
+    ...range(110, 119),
     ...range(701, 709),
     ...range(710, 719),
     ...range(720, 729),
