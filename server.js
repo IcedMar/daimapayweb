@@ -4,13 +4,18 @@ const bodyParser = require('body-parser');
 const axios = require('axios');
 const admin = require('firebase-admin'); // For Firestore
 const cors = require('cors');
+const fs = require('fs'); // <--- ADD THIS LINE
 
 // --- Firebase Admin SDK Initialization ---
 try {
-  const serviceAccountJsonString = process.env.GCP_SERVICE_ACCOUNT_KEY_B64 
-    ? Buffer.from(process.env.GCP_SERVICE_ACCOUNT_KEY_B64, 'base64').toString('utf8')
-    : process.env.GCP_SERVICE_ACCOUNT_KEY_JSON;
-  
+  const serviceAccountFilePath = process.env.GCP_SERVICE_ACCOUNT_FILE_PATH;
+
+  if (!serviceAccountFilePath) {
+    throw new Error('Environment variable GCP_SERVICE_ACCOUNT_FILE_PATH is not set. Cannot load service account key from file.');
+  }
+
+  // Read the service account key from the specified file path
+  const serviceAccountJsonString = fs.readFileSync(serviceAccountFilePath, 'utf8');
   const serviceAccount = JSON.parse(serviceAccountJsonString);
 
   admin.initializeApp({
@@ -18,15 +23,15 @@ try {
     projectId: process.env.GCP_PROJECT_ID,
   });
 
-  console.log('[Firebase] Admin SDK initialized successfully.');
+  console.log('[Firebase] Admin SDK initialized successfully from secret file.');
 } catch (error) {
   console.error('[Firebase] ERROR initializing Admin SDK:', error.message);
-  console.error('[Firebase] Ensure GCP_SERVICE_ACCOUNT_KEY_B64 or GCP_SERVICE_ACCOUNT_KEY_JSON is a valid JSON string.');
+  console.error('[Firebase] Ensure GCP_SERVICE_ACCOUNT_FILE_PATH is correctly set and the file exists and is readable.');
   process.exit(1);
 }
 
 const firestore = admin.firestore();
-
+// Define all collections consistently with the offline server
 const transactionsCollection = firestore.collection('transactions');
 const salesCollection = firestore.collection('sales');
 const errorsCollection = firestore.collection('errors');
@@ -38,13 +43,13 @@ const PORT = process.env.PORT || 3000;
 
 // CORS configuration
 const corsOptions = {
-  origin: 'https://daima-pay-portal.onrender.com', 
+  origin: 'https://daima-pay-portal.onrender.com', // Your frontend origin
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
 };
 
 app.use(cors(corsOptions));
-app.options('/*splat', cors(corsOptions)); 
+app.options('/*splat', cors(corsOptions)); // Handle preflight requests for all routes
 app.use(bodyParser.json());
 
 // --- Global Caches for M-Pesa Airtime Token ---
@@ -171,7 +176,7 @@ async function getCarrierBonus(carrier, amount) {
         if (doc.exists) {
             const data = doc.data();
             const commissionRate = Number(data.commission_rate) || 0;
-            const bonus = parseFloat((amount * commissionRate).toFixed(2));
+            const bonus = parseFloat((amount * commissionRate).toFixed(2)); // Ensure 2 decimal places
             console.log(`[getCarrierBonus] Found ${carrier} commission rate: ${commissionRate}, calculated bonus: ${bonus}`);
             return { bonus, commission_rate: commissionRate };
         } else {
@@ -383,12 +388,12 @@ app.post('/pay', async (req, res) => {
       Password: password,
       Timestamp: timestamp,
       TransactionType: 'CustomerPayBillOnline',
-      Amount: parseFloat(amount), 
+      Amount: parseFloat(amount), // Ensure float
       PartyA: mpesaNumber,
-      PartyB: process.env.TILL_SHORTCODE, 
+      PartyB: process.env.TILL_SHORTCODE, // Your Paybill/Till number
       PhoneNumber: mpesaNumber,
-      CallBackURL: `${process.env.BASE_URL}/stk-callback`, 
-      AccountReference: 'DaimaPayAirtime', 
+      CallBackURL: `${process.env.BASE_URL}/stk-callback`, // Your callback URL
+      AccountReference: 'DaimaPayAirtime', // Unique reference for the transaction
       TransactionDesc: 'Airtime Purchase',
     };
 
@@ -419,19 +424,19 @@ app.post('/pay', async (req, res) => {
     });
     console.log(`📈 [transactions] Initial record for ${checkoutRequestID} created.`);
 
-    // 2. salesCollection
+    // 2. salesCollection (detailed initial record)
     await salesCollection.doc(checkoutRequestID).set({
       date: now,
-      customerName: `Online User (${mpesaNumber})`, 
-      phone: mpesaNumber, 
+      customerName: `Online User (${mpesaNumber})`, // Default name for online
+      phone: mpesaNumber, // Payer's number
       carrier,
       status: 'PENDING',
-      transactionCode: checkoutRequestID, 
+      transactionCode: checkoutRequestID, // M-Pesa transaction ID eventually
       originalAmountPaid: parseFloat(amount),
-      stkPushInitiationResponse: stkResponse.data, 
-      stkPushPayload: stkPushPayload, 
+      stkPushInitiationResponse: stkResponse.data, // Store full STK response
+      stkPushPayload: stkPushPayload, // Store the payload sent
       merchantRequestId: merchantRequestId,
-      topupNumber: topupNumber, 
+      topupNumber: topupNumber, // Recipient
       lastUpdated: now,
     });
     console.log(`📈 [sales] Initial record for ${checkoutRequestID} created.`);
@@ -477,7 +482,7 @@ app.post('/stk-callback', async (req, res) => {
   const phoneNumberUsedForPayment = callback.Body.stkCallback.CallbackMetadata?.Item.find(item => item.Name === 'PhoneNumber')?.Value || null;
 
 
-  const txDocRef = transactionsCollection.doc(checkoutRequestID);
+  const txDocRef = transactionsCollection.doc(checkoutRequestID); // Always reference transactionsCollection first
   const txDoc = await txDocRef.get();
 
   if (!txDoc.exists) {
@@ -494,10 +499,10 @@ app.post('/stk-callback', async (req, res) => {
   }
 
   const txData = txDoc.data();
-  const { topupNumber, amount: originalAmount, carrier, payer } = txData; 
+  const { topupNumber, amount: originalAmount, carrier, payer } = txData; // Rename 'amount' to 'originalAmount' for clarity
 
-  let finalTxStatus = 'FAILED'; 
-  let finalSalesStatus = 'FAILED'; 
+  let finalTxStatus = 'FAILED'; // Status for 'transactions' collection
+  let finalSalesStatus = 'FAILED'; // Status for 'sales' collection
   let airtimeResult = null;
   let bonusAmount = 0;
   let commissionRate = 0;
@@ -601,6 +606,7 @@ app.post('/stk-callback', async (req, res) => {
   }
 
   // --- Final Updates to Firestore ---
+  // 1. Update 'transactions' collection (minimal status update)
   await transactionsCollection.doc(checkoutRequestID).update({
     status: finalTxStatus,
     lastUpdated: now,
@@ -616,6 +622,7 @@ app.post('/stk-callback', async (req, res) => {
     bonus: bonusAmount,
     commission_rate: commissionRate,
     total_sent: totalSentAmount,
+    // M-Pesa callback specific details for sales record
     mpesaReceiptNumber: mpesaReceiptNumber,
     balanceAfterPayment: callback.Body.stkCallback.CallbackMetadata?.Item.find(item => item.Name === 'Balance')?.Value || null,
     transactionDateFromMpesa: transactionDateFromMpesa,
@@ -625,10 +632,13 @@ app.post('/stk-callback', async (req, res) => {
     errorDetails: (finalSalesStatus === 'FAILED' && airtimeResult && airtimeResult.error) ? airtimeResult.error : null,
   });
   console.log(`✅ [sales] Final status for ${checkoutRequestID} updated to: ${finalSalesStatus}`);
+
+  // Always respond to M-Pesa to acknowledge callback receipt
   res.json({ resultCode: 0, resultDesc: 'Callback received and processed by DaimaPay server.' });
 });
 
 
+// New endpoint for frontend to poll transaction status
 app.get('/transaction-status/:checkoutRequestID', async (req, res) => {
     const { checkoutRequestID } = req.params;
     try {
@@ -640,14 +650,15 @@ app.get('/transaction-status/:checkoutRequestID', async (req, res) => {
         }
 
         const data = txDoc.data();
-        const createdAtISO = data.date ? data.date.toDate().toISOString() : null; 
-        const completedAtISO = data.lastUpdated ? data.lastUpdated.toDate().toISOString() : null;
+        // Return only necessary status fields to the client.
+        const createdAtISO = data.date ? data.date.toDate().toISOString() : null; // Use 'date' for transactions collection
+        const completedAtISO = data.lastUpdated ? data.lastUpdated.toDate().toISOString() : null; // Use 'lastUpdated' for final timestamp
 
         res.json({
             status: data.status,
             completedAt: completedAtISO,
             createdAt: createdAtISO,
-            transactionID: data.transactionID,
+            transactionID: data.transactionID, 
             amount: data.amount,
             recipient: data.recipient, 
             source: data.source,
