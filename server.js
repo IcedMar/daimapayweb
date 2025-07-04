@@ -79,7 +79,7 @@ function detectCarrier(phoneNumber) {
     ...range(790, 799)
   ]);
   const airtel = new Set([
-    '100', '101', '102',
+    ...range(100, 109),
     ...range(730, 739),
     ...range(750, 756),
     ...range(780, 789)
