@@ -346,7 +346,7 @@ app.post('/pay', async (req, res) => {
       TransactionType: 'CustomerPayBillOnline',
       Amount: parseFloat(amount), 
       PartyA: mpesaNumber,
-      PartyB: process.env.TILL_SHORTCODE, 
+      PartyB: process.env.BUSINESS_SHORTCODE, 
       PhoneNumber: mpesaNumber,
       CallBackURL: `${process.env.BASE_URL}/stk-callback`, 
       AccountReference: 'DaimaPayAirtime', 
