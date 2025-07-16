@@ -35,11 +35,11 @@ const airtimeBonusesCollection = firestore.collection('airtime_bonuses'); // For
 const carrierFloatsCollection = firestore.collection('carrier_floats'); // For float balances
 
 // M-Pesa API Credentials from .env
-const CONSUMER_KEY = process.env.DARAPAY_CONSUMER_KEY;
-const CONSUMER_SECRET = process.env.DARAPAY_CONSUMER_SECRET;
-const SHORTCODE = process.env.DARAPAY_SHORTCODE; // Your Paybill/Till number
-const PASSKEY = process.env.DARAPAY_PASSKEY;
-const STK_CALLBACK_URL = process.env.DARAPAY_STK_CALLBACK_URL; // Your public URL for /stk-callback
+const CONSUMER_KEY = process.env.CONSUMER_KEY;
+const CONSUMER_SECRET = process.env.CONSUMER_SECRET;
+const SHORTCODE = process.env.BUSINESS_SHORT_CODE; // Your Paybill/Till number
+const PASSKEY = process.env.PASSKEY;
+const STK_CALLBACK_URL = process.env.CALLBACK_URL; // Your public URL for /stk-callback
 const ANALYTICS_SERVER_URL = process.env.ANALYTICS_SERVER_URL; // Your analytics server URL
 
 // Logger setup
