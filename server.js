@@ -112,7 +112,7 @@ async function getAccessToken() {
     logger.debug(`[getAccessToken] Generated Basic Auth string (first 10 chars): ${auth.substring(0, 10)}...`);
 
     const response = await axios.get(
-      'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
+      'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
       {
         headers: {
           Authorization: `Basic ${auth}`,
