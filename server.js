@@ -7,6 +7,8 @@ const admin = require('firebase-admin');
 const AfricasTalking = require('africastalking'); 
 const cors = require('cors');
 
+const app = express();
+
 const serviceAccount = JSON.parse(
   Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_JSON, 'base64').toString('utf-8')
 );
@@ -30,7 +32,7 @@ const bonusHistoryCollection = db.collection('bonus_history');
 const airtimeBonusesDocRef = db.collection('airtime_bonuses').doc('current_settings');
 const safaricomDealerConfigRef = db.collection('mpesa_settings').doc('main_config');
 
-app.use(express.json());;
+app.use(express.json());
 app.use(bodyParser.json());
 const corsOptions = {
   origin: function (origin, callback) {
