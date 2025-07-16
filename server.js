@@ -153,14 +153,26 @@ function detectCarrier(phoneNumber) {
 async function updateCarrierFloatBalance(floatName, amount) {
     logger.info(`Attempting to update float balance for ${floatName} by ${amount}`);
     try {
-        const response = await axios.post(`${ANALYTICS_SERVER_URL}/api/update-float`, {
-            floatName: floatName,
-            amount: amount
-        });
+        const payload = {
+            amount: amount,
+            status: 'SUCCESS', // Or 'COMPLETED', depending on what your primary server considers successful
+            telco: floatName === 'Saf_float' ? 'Safaricom' : 'Airtel', // Map floatName back to telco
+            transactionId: 'YOUR_CHECKOUT_REQUEST_ID_HERE' // Pass the actual CheckoutRequestID from the M-Pesa callback
+        };
+
+        const response = await axios.post(`${ANALYTICS_SERVER_URL}/api/process-airtime-purchase`, payload); // <-- Changed endpoint and payload
+
         logger.info(`Float update response for ${floatName}:`, response.data);
         return { success: true, data: response.data };
     } catch (error) {
         logger.error(`Error updating float balance for ${floatName}:`, error.message);
+        // Log more details about the error response for better debugging
+        if (error.response) {
+            logger.error(`Analytics Server Error Status: ${error.response.status}`);
+            logger.error(`Analytics Server Error Data:`, error.response.data);
+        } else if (error.request) {
+            logger.error(`No response received from Analytics Server request:`, error.request);
+        }
         return { success: false, message: error.message };
     }
 }
