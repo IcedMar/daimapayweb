@@ -1,25 +1,24 @@
-// server.js - For STK Push Initiation and M-Pesa STK Callback Handling (NO OPTIONAL CHAINING)
+// server.js - Corrected STK Push Initiation and M-Pesa STK Callback Handling
 
-// --- IMPORTS AND CONFIGURATION ---
-require('dotenv').config(); // Load environment variables from .env file
+// --- IMPORTS AND CONFIGURATION (no changes needed here) ---
+require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
 const admin = require('firebase-admin');
 const { FieldValue } = require('firebase-admin/firestore');
 const rateLimit = require('express-rate-limit');
-const winston = require('winston'); // For logging
-const cors = require('cors'); // Added CORS
+const winston = require('winston');
+const cors = require('cors');
 
-// Initialize Firebase Admin SDk
+// Initialize Firebase Admin SDK
 const serviceAccount = JSON.parse(
     Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_JSON, 'base64').toString('utf-8')
 );
 
-// Check if a Firebase app has already been initialized to avoid re-initialization errors
 if (!admin.apps.length) {
     admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount) // Use admin.credential.cert() with the parsed serviceAccount
+        credential: admin.credential.cert(serviceAccount)
     });
 }
 
@@ -27,22 +26,22 @@ const firestore = admin.firestore();
 
 // Firestore Collection References
 const transactionsCollection = firestore.collection('transactions');
-const salesCollection = firestore.collection('sales'); // This will store initial requests AND fulfillment details
+const salesCollection = firestore.collection('sales');
 const errorsCollection = firestore.collection('errors');
 const failedReconciliationsCollection = firestore.collection('failed_reconciliations');
 const reconciledTransactionsCollection = firestore.collection('reconciled_transactions');
-const airtimeBonusesCollection = firestore.collection('airtime_bonuses'); // For bonus settings
-const carrierFloatsCollection = firestore.collection('carrier_floats'); // For float balances
+const airtimeBonusesCollection = firestore.collection('airtime_bonuses');
+const carrierFloatsCollection = firestore.collection('carrier_floats');
 
 // M-Pesa API Credentials from .env
 const CONSUMER_KEY = process.env.CONSUMER_KEY;
 const CONSUMER_SECRET = process.env.CONSUMER_SECRET;
-const SHORTCODE = process.env.BUSINESS_SHORT_CODE; // Your Paybill/Till number
+const SHORTCODE = process.env.BUSINESS_SHORT_CODE;
 const PASSKEY = process.env.PASSKEY;
-const STK_CALLBACK_URL = process.env.CALLBACK_URL; // Your public URL for /stk-callback
-const ANALYTICS_SERVER_URL = process.env.ANALYTICS_SERVER_URL; // Your analytics server URL
+const STK_CALLBACK_URL = process.env.CALLBACK_URL;
+const ANALYTICS_SERVER_URL = process.env.ANALYTICS_SERVER_URL;
 
-// Logger setup
+// Logger setup (no changes needed here)
 const logger = winston.createLogger({
     level: 'info',
     format: winston.format.combine(
@@ -51,8 +50,6 @@ const logger = winston.createLogger({
     ),
     transports: [
         new winston.transports.Console(),
-        // new winston.transports.File({ filename: 'error.log', level: 'error' }),
-        // new winston.transports.File({ filename: 'combined.log' })
     ],
 });
 
@@ -60,15 +57,13 @@ const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// --- CORS Configuration ---
-// Allow specific origins (recommended for production)
+// --- CORS Configuration (no changes needed here) ---
 const allowedOrigins = [
-     'https://daima-pay-portal.onrender.com',
-  'https://dpanalyticsserver.onrender.com'
+    'https://daima-pay-portal.onrender.com',
+    'https://dpanalyticsserver.onrender.com'
 ];
 app.use(cors({
     origin: function (origin, callback) {
-        // allow requests with no origin (like mobile apps or curl requests)
         if (!origin) return callback(null, true);
         if (allowedOrigins.indexOf(origin) === -1) {
             const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
@@ -76,22 +71,19 @@ app.use(cors({
         }
         return callback(null, true);
     },
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', // Allowed HTTP methods
-    credentials: true, // Allow cookies to be sent with requests (if needed)
-    optionsSuccessStatus: 204 // Some legacy browsers (IE11, various SmartTVs) choke on 200
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+    credentials: true,
+    optionsSuccessStatus: 204
 }));
 
 
-// --- HELPER FUNCTIONS (PLACEHOLDERS - Implement these based on your existing code) ---
+// --- HELPER FUNCTIONS (no changes needed here) ---
 
-// Function to get Daraja access token
 async function getAccessToken() {
     const auth = Buffer.from(`${CONSUMER_KEY}:${CONSUMER_SECRET}`).toString('base64');
     try {
         const response = await axios.get('https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials', {
-            headers: {
-                'Authorization': `Basic ${auth}`
-            }
+            headers: { 'Authorization': `Basic ${auth}` }
         });
         return response.data.access_token;
     } catch (error) {
@@ -100,7 +92,6 @@ async function getAccessToken() {
     }
 }
 
-// Function to generate the timestamp for M-Pesa API
 function generateTimestamp() {
     const date = new Date();
     const year = date.getFullYear().toString();
@@ -112,13 +103,11 @@ function generateTimestamp() {
     return `${year}${month}${day}${hour}${minute}${second}`;
 }
 
-// Function to generate password for STK Push
 function generatePassword(shortcode, passkey, timestamp) {
     const str = shortcode + passkey + timestamp;
     return Buffer.from(str).toString('base64');
 }
 
-// Placeholder for detecting carrier (You already have this in your C2B handler)
 function detectCarrier(phoneNumber) {
     const normalized = phoneNumber.replace(/^(\+254|254)/, '0').trim();
     if (normalized.length !== 10 || !normalized.startsWith('0')) {
@@ -161,13 +150,9 @@ function detectCarrier(phoneNumber) {
     return 'Unknown';
 }
 
-// Placeholder for updating carrier float balance on your analytics/float management server
-// This is called by the STK Callback to deduct the amount received from the customer.
-// The fulfillment process will handle the actual float deductions for airtime dispatch.
 async function updateCarrierFloatBalance(floatName, amount) {
     logger.info(`Attempting to update float balance for ${floatName} by ${amount}`);
     try {
-        // This should hit your Analytics Server's endpoint for float adjustments
         const response = await axios.post(`${ANALYTICS_SERVER_URL}/api/update-float`, {
             floatName: floatName,
             amount: amount
@@ -180,18 +165,20 @@ async function updateCarrierFloatBalance(floatName, amount) {
     }
 }
 
-// --- RATE LIMITING ---
+// --- RATE LIMITING (add trust proxy here for express-rate-limit warning) ---
+app.set('trust proxy', 1); // <--- ADD THIS LINE FOR EXPRESS-RATE-LIMIT WARNING
+
 const stkPushLimiter = rateLimit({
-    windowMs: 1 * 60 * 1000, // 1 minute
-    max: 20, // Limit each IP to 20 requests per window
+    windowMs: 1 * 60 * 1000,
+    max: 20,
     message: 'Too many STK Push requests from this IP, please try again after a minute.',
     statusCode: 429,
     headers: true,
 });
 
 const stkCallbackRateLimiter = rateLimit({
-    windowMs: 1 * 60 * 1000, // 1 minute
-    max: 100, // M-Pesa can send multiple retries
+    windowMs: 1 * 60 * 1000,
+    max: 100,
     message: 'Too many STK Callback requests, please try again later.',
     statusCode: 429,
     headers: true,
@@ -202,7 +189,7 @@ const stkCallbackRateLimiter = rateLimit({
 
 // 1. STK Push Initiation Endpoint
 app.post('/stk-push', stkPushLimiter, async (req, res) => {
-    const { amount, phoneNumber, recipient } = req.body; // recipient is the number to top up
+    const { amount, phoneNumber, recipient } = req.body;
 
     if (!amount || !phoneNumber || !recipient) {
         return res.status(400).json({ success: false, message: 'Missing required parameters: amount, phoneNumber, recipient.' });
@@ -210,71 +197,82 @@ app.post('/stk-push', stkPushLimiter, async (req, res) => {
 
     const timestamp = generateTimestamp();
     const password = generatePassword(SHORTCODE, PASSKEY, timestamp);
-    const checkoutRequestID = `STK-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`; // Unique ID for our system
+
+    // *** IMPORTANT CHANGE HERE ***
+    // We will save a preliminary document first, and then get M-Pesa's CheckoutRequestID
+    // to use as the true document ID for tracking the transaction.
+    let mpesaCheckoutRequestID = null; // Will store the CheckoutRequestID from Safaricom
 
     logger.info(`Initiating STK Push for recipient: ${recipient}, amount: ${amount}, customer: ${phoneNumber}`);
 
     try {
         const accessToken = await getAccessToken();
-        const detectedCarrier = detectCarrier(recipient); // Detect carrier at initiation
-
-        // --- Create initial request document in salesCollection ---
-        // This document will be updated by the STK callback
-        // and later by the fulfillment process.
-        await salesCollection.doc(checkoutRequestID).set({
-            saleId: checkoutRequestID, // Use checkoutRequestID as saleId for this stage
-            initiatorPhoneNumber: phoneNumber, // The phone number initiating the STK push
-            recipient: recipient, // The number to top up
-            amount: parseFloat(amount), // Original amount requested by customer
-            carrier: detectedCarrier, // Detected carrier for the recipient
-            mpesaPaymentStatus: 'PENDING_MPESA_CONFIRMATION', // Initial status
-            createdAt: FieldValue.serverTimestamp(),
-            lastUpdated: FieldValue.serverTimestamp(),
-            type: 'STK_PUSH_REQUEST', // Distinguish from fulfilled sales
-            // Other fields will be added by the callback and fulfillment logic
-        });
-        logger.info(`✅ Initial sale request document ${checkoutRequestID} created.`);
-
+        const detectedCarrier = detectCarrier(recipient);
 
         const stkPushResponse = await axios.post('https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest', {
             BusinessShortCode: SHORTCODE,
             Password: password,
             Timestamp: timestamp,
-            TransactionType: 'CustomerPayBillOnline', // Or 'CustomerBuyGoodsOnline' if applicable
+            TransactionType: 'CustomerPayBillOnline',
             Amount: amount,
-            PartyA: phoneNumber, // Customer's phone number
-            PartyB: SHORTCODE, // Your Paybill/Till number
-            PhoneNumber: phoneNumber, // Customer's phone number
+            PartyA: phoneNumber,
+            PartyB: SHORTCODE,
+            PhoneNumber: phoneNumber,
             CallBackURL: STK_CALLBACK_URL,
-            AccountReference: recipient, // Use recipient number as account reference
+            AccountReference: recipient,
             TransactionDesc: `Airtime for ${recipient}`
         }, {
-            headers: {
-                'Authorization': `Bearer ${accessToken}`
-            }
+            headers: { 'Authorization': `Bearer ${accessToken}` }
         });
 
         logger.info('STK Push Request Sent:', stkPushResponse.data);
 
-        // Update the initial request document with M-Pesa response
-        await salesCollection.doc(checkoutRequestID).update({
-            mpesaResponse: stkPushResponse.data,
-            lastUpdated: FieldValue.serverTimestamp()
-        });
-        logger.info(`✅ Initial sale request document ${checkoutRequestID} updated with STK Push response.`);
+        // *** Use M-Pesa's CheckoutRequestID as the primary identifier ***
+        if (stkPushResponse.data && stkPushResponse.data.ResponseCode === '0' && stkPushResponse.data.CheckoutRequestID) {
+            mpesaCheckoutRequestID = stkPushResponse.data.CheckoutRequestID;
 
-        res.status(200).json({ success: true, message: 'STK Push initiated successfully.', data: stkPushResponse.data });
+            // --- Create or Update the sales document using M-Pesa's CheckoutRequestID ---
+            // This document will store all stages of the transaction (initiation, callback, fulfillment)
+            await salesCollection.doc(mpesaCheckoutRequestID).set({
+                saleId: mpesaCheckoutRequestID, // M-Pesa's CheckoutRequestID as our primary ID
+                initiatorPhoneNumber: phoneNumber,
+                recipient: recipient,
+                amount: parseFloat(amount),
+                carrier: detectedCarrier,
+                mpesaPaymentStatus: 'PENDING_MPESA_CONFIRMATION', // Initial status
+                createdAt: FieldValue.serverTimestamp(),
+                lastUpdated: FieldValue.serverTimestamp(),
+                type: 'STK_PUSH_REQUEST',
+                mpesaResponse: stkPushResponse.data, // Store full M-Pesa STK Push response
+                // Other fulfillment-related fields will be added by the callback and fulfillment logic
+            });
+            logger.info(`✅ Sale request document ${mpesaCheckoutRequestID} created/updated with STK Push response.`);
+        } else {
+            // Handle cases where STK Push was not successful or CheckoutRequestID is missing
+            logger.error('❌ STK Push initiation failed or CheckoutRequestID missing in response:', stkPushResponse.data);
+            const errorMessage = stkPushResponse.data.CustomerMessage || stkPushResponse.data.ResponseDescription || 'STK Push initiation failed';
+            await errorsCollection.add({
+                type: 'STK_PUSH_INITIATION_FAILED_NO_CHECKOUT_ID',
+                error: errorMessage,
+                response: stkPushResponse.data,
+                requestBody: req.body,
+                createdAt: FieldValue.serverTimestamp(),
+            });
+            return res.status(500).json({ success: false, message: 'Failed to initiate STK Push or get M-Pesa ID.', error: errorMessage });
+        }
+
+        res.status(200).json({ success: true, message: 'STK Push initiated successfully.', data: { CheckoutRequestID: mpesaCheckoutRequestID, ...stkPushResponse.data } });
 
     } catch (error) {
         logger.error('❌ Error during STK Push initiation:', {
             message: error.message,
             stack: error.stack,
-            requestBody: req.body
+            requestBody: req.body,
+            errorResponse: error.response ? error.response.data : 'No response data'
         });
 
         const errorMessage = error.response ? error.response.data : error.message;
 
-        // Log the error
         await errorsCollection.add({
             type: 'STK_PUSH_INITIATION_ERROR',
             error: errorMessage,
@@ -294,10 +292,31 @@ app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
 
     logger.info('📞 Received STK Callback:', JSON.stringify(callback));
 
-    const resultCode = callback.Body.stkCallback.ResultCode;
-    const checkoutRequestID = callback.Body.stkCallback.CheckoutRequestID; // This will be the transactionID for consistency
+    // Ensure the callback structure is as expected
+    if (!callback || !callback.Body || !callback.Body.stkCallback) {
+        logger.error('❌ Invalid STK Callback structure received:', JSON.stringify(callback));
+        await errorsCollection.add({
+            type: 'INVALID_STK_CALLBACK_STRUCTURE',
+            callbackData: callback,
+            createdAt: now,
+        });
+        return res.json({ ResultCode: 1, ResultDesc: 'Invalid callback structure.' });
+    }
 
-    // --- REPLACED OPTIONAL CHAINING HERE ---
+    const resultCode = callback.Body.stkCallback.ResultCode;
+    const checkoutRequestID = callback.Body.stkCallback.CheckoutRequestID; // This is the M-Pesa CheckoutRequestID
+
+    if (!checkoutRequestID) {
+        logger.error('❌ STK Callback received without CheckoutRequestID:', JSON.stringify(callback));
+        await errorsCollection.add({
+            type: 'STK_CALLBACK_MISSING_CHECKOUT_ID',
+            callbackData: callback,
+            createdAt: now,
+        });
+        return res.json({ ResultCode: 1, ResultDesc: 'Missing CheckoutRequestID in callback.' });
+    }
+
+
     let mpesaReceiptNumber = null;
     let transactionDateFromMpesa = null;
     let phoneNumberUsedForPayment = null;
@@ -325,14 +344,15 @@ app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
             amountPaidByCustomer = amountItem.Value;
         }
     }
-    // --- END REPLACED OPTIONAL CHAINING ---
 
-    // Retrieve the initial sales request document
-    const initialSalesRequestDocRef = salesCollection.doc(checkoutRequestID);
+    // Retrieve the initial sales request document using the M-Pesa CheckoutRequestID
+    const initialSalesRequestDocRef = salesCollection.doc(checkoutRequestID); // <--- NOW THIS WILL MATCH!
     const initialSalesRequestDoc = await initialSalesRequestDocRef.get();
 
     if (!initialSalesRequestDoc.exists) {
         logger.error('❌ No matching initial sales request for CheckoutRequestID in Firestore:', checkoutRequestID);
+        // This should now only happen if the STK Push initiation failed before saving to Firestore
+        // or if there's a serious latency issue / data loss.
         await errorsCollection.doc(`STK_CALLBACK_NO_INITIAL_REQUEST_${checkoutRequestID}_${Date.now()}`).set({
             type: 'STK_CALLBACK_ERROR',
             error: 'No matching initial sales request found for CheckoutRequestID. Cannot process callback.',
@@ -344,41 +364,37 @@ app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
     }
 
     const initialRequestData = initialSalesRequestDoc.data();
-    const topupNumber = initialRequestData.recipient; // Get recipient from initial request
-    const carrier = initialRequestData.carrier; // Get carrier from initial request
+    const topupNumber = initialRequestData.recipient;
+    const carrier = initialRequestData.carrier;
 
-    let finalTransactionStatus; // Reflects payment outcome and initial fulfillment state
-    let needsReconciliation = false; // For payment processing errors (e.g., analytics update failed)
+    let finalTransactionStatus;
+    let needsReconciliation = false;
 
-    // Reference to the 'transactions' document (using checkoutRequestID as its ID)
     const transactionDocRef = transactionsCollection.doc(checkoutRequestID);
 
     if (resultCode === 0) {
-        // M-Pesa payment was successful
         logger.info(`✅ M-Pesa payment successful for ${checkoutRequestID}. Marking for fulfillment.`);
-        finalTransactionStatus = 'RECEIVED_PENDING_FULFILLMENT'; // Unified status
+        finalTransactionStatus = 'RECEIVED_PENDING_FULFILLMENT';
 
-        // Create or update the transaction record with initial details
         await transactionDocRef.set({
-            transactionID: checkoutRequestID, // M-Pesa's unique ID for this transaction
-            type: 'STK_PUSH_PAYMENT', // Explicitly mark as STK Push
-            transactionTime: transactionDateFromMpesa, // M-Pesa's timestamp
-            amountReceived: amountPaidByCustomer ? parseFloat(amountPaidByCustomer) : null, // Actual amount paid
-            mpesaReceiptNumber: mpesaReceiptNumber, // M-Pesa receipt
+            transactionID: checkoutRequestID,
+            type: 'STK_PUSH_PAYMENT',
+            transactionTime: transactionDateFromMpesa,
+            amountReceived: amountPaidByCustomer ? parseFloat(amountPaidByCustomer) : null,
+            mpesaReceiptNumber: mpesaReceiptNumber,
             payerMsisdn: phoneNumberUsedForPayment,
-            // payerName: initialRequestData.customerName || null, // If you capture this at initiation
-            billRefNumber: topupNumber, // The recipient number for airtime
-            carrier: carrier, // The carrier for the recipient
-            mpesaRawCallback: callback, // Full M-Pesa callback data
-            status: finalTransactionStatus, // Set to pending fulfillment
+            billRefNumber: topupNumber,
+            carrier: carrier,
+            mpesaRawCallback: callback,
+            status: finalTransactionStatus,
             fulfillmentStatus: 'PENDING', // Initial fulfillment status
             mpesaResultCode: resultCode,
             mpesaResultDesc: callback.Body.stkCallback.ResultDesc,
-            createdAt: initialRequestData.createdAt || now, // Use initial request timestamp if available
+            createdAt: initialRequestData.createdAt || now,
             lastUpdated: now,
-            relatedSaleId: checkoutRequestID, // Link to the existing sales request doc
-            reconciliationNeeded: false, // Assume not needed initially for payment processing
-        }, { merge: true }); // Use merge to avoid overwriting if doc already exists from initial request logging
+            relatedSaleId: checkoutRequestID,
+            reconciliationNeeded: false,
+        }, { merge: true });
         logger.info(`✅ [transactions] Record for ${checkoutRequestID} created/updated with status: ${finalTransactionStatus}`);
 
         // --- Notify Analytics Server for float deduction (customer's payment received) ---
@@ -386,9 +402,9 @@ app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
             logger.info(`Attempting to notify Analytics Server for payment ${checkoutRequestID} (type: PAYMENT_RECEIVED)...`);
             const analyticsPayload = {
                 transactionId: checkoutRequestID,
-                amount: amountPaidByCustomer ? parseFloat(amountPaidByCustomer) : 0, // Amount customer paid
-                status: 'PAYMENT_RECEIVED', // Report only payment receipt
-                carrier: carrier, // The carrier for the airtime recipient
+                amount: amountPaidByCustomer ? parseFloat(amountPaidByCustomer) : 0,
+                status: 'PAYMENT_RECEIVED',
+                carrier: carrier,
                 type: 'STK_PUSH_PAYMENT',
                 mpesaReceiptNumber: mpesaReceiptNumber,
                 payerMsisdn: phoneNumberUsedForPayment,
@@ -414,7 +430,6 @@ app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
                 stack: deductionError.stack,
                 createdAt: now,
             });
-            // Mark for reconciliation as analytics update failed
             needsReconciliation = true;
             await transactionDocRef.update({
                 reconciliationNeeded: true,
@@ -424,7 +439,6 @@ app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
         }
 
     } else {
-        // M-Pesa payment failed or was cancelled by user
         logger.info(`❌ Payment failed for ${checkoutRequestID}. ResultCode: ${resultCode}, Desc: ${callback.Body.stkCallback.ResultDesc}`);
         finalTransactionStatus = 'MPESA_PAYMENT_FAILED';
 
@@ -438,15 +452,15 @@ app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
             billRefNumber: topupNumber,
             carrier: carrier,
             mpesaRawCallback: callback,
-            status: finalTransactionStatus, // Payment failed
-            fulfillmentStatus: 'NOT_APPLICABLE', // No fulfillment needed
+            status: finalTransactionStatus,
+            fulfillmentStatus: 'NOT_APPLICABLE',
             mpesaResultCode: resultCode,
             mpesaResultDesc: callback.Body.stkCallback.ResultDesc,
             errorMessage: `M-Pesa payment failed: ${callback.Body.stkCallback.ResultDesc}`,
             createdAt: initialRequestData.createdAt || now,
             lastUpdated: now,
             relatedSaleId: checkoutRequestID,
-            reconciliationNeeded: false, // No reconciliation needed as customer didn't pay
+            reconciliationNeeded: false,
         }, { merge: true });
         logger.info(`✅ [transactions] Record for ${checkoutRequestID} updated to: ${finalTransactionStatus}`);
 
@@ -460,22 +474,18 @@ app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
     }
 
     // Update the initial 'sales' request document to reflect the payment status
-    // It will be further updated by the fulfillment logic once airtime is sent.
     await initialSalesRequestDocRef.update({
-        mpesaPaymentStatus: finalTransactionStatus, // Store M-Pesa payment outcome
+        mpesaPaymentStatus: finalTransactionStatus,
         mpesaReceiptNumber: mpesaReceiptNumber,
         mpesaTransactionDate: transactionDateFromMpesa,
         mpesaPhoneNumberUsed: phoneNumberUsedForPayment,
         mpesaAmountPaid: amountPaidByCustomer ? parseFloat(amountPaidByCustomer) : null,
-        fullStkCallback: callback, // Store full callback in the sales/request doc
+        fullStkCallback: callback,
         lastUpdated: now,
-        reconciliationNeededAtPayment: needsReconciliation, // Reflect if payment stage needs recon
-        // Importantly, fulfillment-related fields (bonus, total_sent, airtimeResult, providerUsed)
-        // should NOT be set here, as they will be set by the unified fulfillment logic.
+        reconciliationNeededAtPayment: needsReconciliation,
     });
     logger.info(`✅ [sales/initial_request] M-Pesa payment status for ${checkoutRequestID} updated.`);
 
-    // If analytics notification failed and payment was successful, mark for reconciliation
     if (needsReconciliation && resultCode === 0) {
         await failedReconciliationsCollection.doc(checkoutRequestID).set({
             transactionId: checkoutRequestID,
