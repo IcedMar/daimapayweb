@@ -16,21 +16,6 @@ const allowedOrigins =[
   'https://dpanalyticsserver.onrender.com'
 ];
 
-app.use(cors({
-    origin: function (origin, callback) {
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) === -1) {
-            const msg = `The CORS policy for this site does not allow access from the specified Origin: ${origin}`;
-            logger.error(msg); // Use your logger here
-            return callback(new Error(msg), false);
-        }
-        return callback(null, true);
-    },
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', 
-    credentials: true, 
-    optionsSuccessStatus: 204
-}));
-
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
     databaseURL: process.env.FIREBASE_DATABASE_URL 
@@ -47,6 +32,21 @@ const safaricomDealerConfigRef = db.collection('mpesa_settings').doc('main_confi
 
 const app = express();
 app.use(bodyParser.json());
+
+app.use(cors({
+    origin: function (origin, callback) {
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) === -1) {
+            const msg = `The CORS policy for this site does not allow access from the specified Origin: ${origin}`;
+            logger.error(msg); // Use your logger here
+            return callback(new Error(msg), false);
+        }
+        return callback(null, true);
+    },
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', 
+    credentials: true, 
+    optionsSuccessStatus: 204
+}));
 
 // --- Simple Logger Utility ---
 const logger = {
