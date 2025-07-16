@@ -99,7 +99,18 @@ async function getAccessToken() {
   try {
     const consumerKey = process.env.CONSUMER_KEY;
     const consumerSecret = process.env.CONSUMER_SECRET;
+
+    logger.debug(`[getAccessToken] Using Consumer Key (first 5 chars): ${consumerKey ? consumerKey.substring(0, 5) : 'N/A'}`);
+    logger.debug(`[getAccessToken] Using Consumer Secret (first 5 chars): ${consumerSecret ? consumerSecret.substring(0, 5) : 'N/A'}`);
+
+    if (!consumerKey || !consumerSecret) {
+        logger.error('[getAccessToken] CONSUMER_KEY or CONSUMER_SECRET are missing!');
+        throw new Error('M-Pesa API credentials are not set.');
+    }
+
     const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
+    logger.debug(`[getAccessToken] Generated Basic Auth string (first 10 chars): ${auth.substring(0, 10)}...`);
+
     const response = await axios.get(
       'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
       {
@@ -111,7 +122,7 @@ async function getAccessToken() {
     logger.info('Token generation successful:', response.data);
     return response.data.access_token;
   } catch (err) {
-    logger.error('Token generation failed:', err.response?.data || err.message);
+    logger.error('Token generation failed:', err.response?.data || err.message, err.stack);
     throw err;
   }
 }
