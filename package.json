@@ -19,6 +19,7 @@
     "express": "^5.1.0",
     "express-rate-limit": "^8.0.0",
     "firebase-admin": "^13.4.0",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "winston": "^3.17.0"
   }
 }

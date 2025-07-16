@@ -1,223 +1,124 @@
-require('dotenv').config(); 
+// server.js - For STK Push Initiation and M-Pesa STK Callback Handling (NO OPTIONAL CHAINING)
+
+// --- IMPORTS AND CONFIGURATION ---
+require('dotenv').config(); // Load environment variables from .env file
 const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
-const rateLimit = require('express-rate-limit');
 const admin = require('firebase-admin');
-const AfricasTalking = require('africastalking'); 
-const cors = require('cors');
+const { FieldValue } = require('firebase-admin/firestore');
+const rateLimit = require('express-rate-limit');
+const winston = require('winston'); // For logging
+const cors = require('cors'); // Added CORS
 
-const app = express();
-
+// Initialize Firebase Admin SDk
 const serviceAccount = JSON.parse(
-  Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_JSON, 'base64').toString('utf-8')
+    Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_JSON, 'base64').toString('utf-8')
 );
 
-const allowedOrigins =[
-  'https://daima-pay-portal.onrender.com',
+// Check if a Firebase app has already been initialized to avoid re-initialization errors
+if (!admin.apps.length) {
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount) // Use admin.credential.cert() with the parsed serviceAccount
+    });
+}
+
+const firestore = admin.firestore();
+
+// Firestore Collection References
+const transactionsCollection = firestore.collection('transactions');
+const salesCollection = firestore.collection('sales'); // This will store initial requests AND fulfillment details
+const errorsCollection = firestore.collection('errors');
+const failedReconciliationsCollection = firestore.collection('failed_reconciliations');
+const reconciledTransactionsCollection = firestore.collection('reconciled_transactions');
+const airtimeBonusesCollection = firestore.collection('airtime_bonuses'); // For bonus settings
+const carrierFloatsCollection = firestore.collection('carrier_floats'); // For float balances
+
+// M-Pesa API Credentials from .env
+const CONSUMER_KEY = process.env.DARAPAY_CONSUMER_KEY;
+const CONSUMER_SECRET = process.env.DARAPAY_CONSUMER_SECRET;
+const SHORTCODE = process.env.DARAPAY_SHORTCODE; // Your Paybill/Till number
+const PASSKEY = process.env.DARAPAY_PASSKEY;
+const STK_CALLBACK_URL = process.env.DARAPAY_STK_CALLBACK_URL; // Your public URL for /stk-callback
+const ANALYTICS_SERVER_URL = process.env.ANALYTICS_SERVER_URL; // Your analytics server URL
+
+// Logger setup
+const logger = winston.createLogger({
+    level: 'info',
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.json()
+    ),
+    transports: [
+        new winston.transports.Console(),
+        // new winston.transports.File({ filename: 'error.log', level: 'error' }),
+        // new winston.transports.File({ filename: 'combined.log' })
+    ],
+});
+
+const app = express();
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// --- CORS Configuration ---
+// Allow specific origins (recommended for production)
+const allowedOrigins = [
+     'https://daima-pay-portal.onrender.com',
   'https://dpanalyticsserver.onrender.com'
 ];
-
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-    databaseURL: process.env.FIREBASE_DATABASE_URL 
-});
-
-const db = admin.firestore();
-const transactionsCollection = db.collection('transactions');
-const salesCollection = db.collection('sales');
-const errorsCollection = db.collection('errors');
-const failedReconciliationsCollection = db.collection('failed_reconciliations');
-const bonusHistoryCollection = db.collection('bonus_history');
-const airtimeBonusesDocRef = db.collection('airtime_bonuses').doc('current_settings');
-const safaricomDealerConfigRef = db.collection('mpesa_settings').doc('main_config');
-
-app.use(express.json());
-app.use(bodyParser.json());
-const corsOptions = {
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type'],
-};
-
-app.use(cors(corsOptions));
-
-// --- Simple Logger Utility ---
-const logger = {
-    info: (...args) => console.log(`[INFO] [${new Date().toISOString()}]`, ...args),
-    warn: (...args) => console.warn(`[WARN] [${new Date().toISOString()}]`, ...args),
-    error: (...args) => console.error(`[ERROR] [${new Date().toISOString()}]`, ...args),
-    debug: (...args) => process.env.NODE_ENV !== 'production' && console.log(`[DEBUG] [${new Date().toISOString()}]`, ...args), // Debug only in non-prod
-};
-
-// --- Configuration Constants from Environment Variables ---
-const PORT = process.env.PORT || 3000;
-const BUSINESS_SHORT_CODE = process.env.BUSINESS_SHORT_CODE;
-const PASSKEY = process.env.PASSKEY;
-const CONSUMER_KEY = process.env.CONSUMER_KEY; // For M-Pesa STK Push Auth
-const CONSUMER_SECRET = process.env.CONSUMER_SECRET; // For M-Pesa STK Push Auth
-const CALLBACK_URL = process.env.CALLBACK_URL; // Your publicly ible URL for M-Pesa callbacks
-const ANALYTICS_SERVER_URL = process.env.ANALYTICS_SERVER_URL; 
-
-// NEW: Environment variables for Safaricom Dealer API and Africa's Talking
-const SAFARICOM_MPESA_AUTH_URL = process.env.MPESA_AUTH_URL; 
-const SAFARICOM_STK_PUSH_URL = process.env.MPESA_STK_PUSH_URL; 
-
-const MPESA_AIRTIME_KEY = process.env.MPESA_AIRTIME_KEY; 
-const MPESA_AIRTIME_SECRET = process.env.MPESA_AIRTIME_SECRET; 
-const MPESA_GRANT_URL = process.env.MPESA_GRANT_URL; 
-const DEALER_SENDER_MSISDN = process.env.DEALER_SENDER_MSISDN; 
-const MPESA_AIRTIME_URL = process.env.MPESA_AIRTIME_URL; 
-
-const AT_API_KEY = process.env.AT_API_KEY; 
-const AT_USERNAME = process.env.AT_USERNAME; 
-
-// Initialize Africa's Talking SDK
-const africastalking = AfricasTalking({
-    apiKey: AT_API_KEY,
-    username: AT_USERNAME,
-});
+app.use(cors({
+    origin: function (origin, callback) {
+        // allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) === -1) {
+            const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+            return callback(new Error(msg), false);
+        }
+        return callback(null, true);
+    },
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', // Allowed HTTP methods
+    credentials: true, // Allow cookies to be sent with requests (if needed)
+    optionsSuccessStatus: 204 // Some legacy browsers (IE11, various SmartTVs) choke on 200
+}));
 
 
-// --- Cache variables for Safaricom Airtime Token ---
-let cachedAirtimeToken = null;
-let tokenExpiryTimestamp = 0;
+// --- HELPER FUNCTIONS (PLACEHOLDERS - Implement these based on your existing code) ---
 
-// NEW: Cache variables for Dealer Service PIN
-let cachedDealerServicePin = null;
-let dealerPinExpiryTimestamp = 0;
-const DEALER_PIN_CACHE_TTL = 10 * 60 * 1000; 
-
-// --- Helper Functions ---
+// Function to get Daraja access token
 async function getAccessToken() {
-  try {
-    const consumerKey = process.env.CONSUMER_KEY;
-    const consumerSecret = process.env.CONSUMER_SECRET;
-
-    logger.debug(`[getAccessToken] Using Consumer Key (first 5 chars): ${consumerKey ? consumerKey.substring(0, 5) : 'N/A'}`);
-    logger.debug(`[getAccessToken] Using Consumer Secret (first 5 chars): ${consumerSecret ? consumerSecret.substring(0, 5) : 'N/A'}`);
-
-    if (!consumerKey || !consumerSecret) {
-        logger.error('[getAccessToken] CONSUMER_KEY or CONSUMER_SECRET are missing!');
-        throw new Error('M-Pesa API credentials are not set.');
-    }
-
-    const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
-    logger.debug(`[getAccessToken] Generated Basic Auth string (first 10 chars): ${auth.substring(0, 10)}...`);
-
-    const response = await axios.get(
-      'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
-      {
-        headers: {
-          Authorization: `Basic ${auth}`,
-        },
-      }
-    );
-    logger.info('Token generation successful:', response.data);
-    return response.data.access_token;
-  } catch (err) {
-    logger.error('Token generation failed:', err.response?.data || err.message, err.stack);
-    throw err;
-  }
-}
-
-// NEW: Service PIN generation
-async function generateServicePin(rawPin) {
-    logger.debug('[generateServicePin] rawPin length:', rawPin ? rawPin.length : 'null');
+    const auth = Buffer.from(`${CONSUMER_KEY}:${CONSUMER_SECRET}`).toString('base64');
     try {
-        const encodedPin = Buffer.from(rawPin).toString('base64'); // Correct for Node.js
-        logger.debug('[generateServicePin] encodedPin length:', encodedPin.length);
-        return encodedPin;
-    } catch (error) {
-        logger.error('[generateServicePin] error:', error);
-        throw new Error(`Service PIN generation failed: ${error.message}`);
-    }
-}
-
-// NEW: Function to get dealer service PIN from Firestore with caching
-async function getDealerServicePin() {
-    const now = Date.now();
-    if (cachedDealerServicePin && now < dealerPinExpiryTimestamp) {
-        logger.info('🔑 Using cached dealer service PIN from memory.');
-        return cachedDealerServicePin;
-    }
-
-    logger.info('🔄 Fetching dealer service PIN from Firestore (mpesa_settings/main_config/servicePin)...');
-    try {
-        const doc = await safaricomDealerConfigRef.get(); // This now points to mpesa_settings/main_config
-
-        if (!doc.exists) {
-            const errorMsg = 'Dealer service PIN configuration document (mpesa_settings/main_config) not found in Firestore. Please create it with a "servicePin" field.';
-            logger.error(`❌ ${errorMsg}`);
-            throw new Error(errorMsg);
-        }
-
-        const pin = doc.data().servicePin; // THIS IS THE KEY CHANGE for the field name
-
-        if (!pin) {
-            const errorMsg = 'Dealer service PIN field ("servicePin") not found in Firestore document (mpesa_settings/main_config). Please add it.';
-            logger.error(`❌ ${errorMsg}`);
-            throw new Error(errorMsg);
-        }
-
-        // Cache the retrieved PIN and set expiry
-        cachedDealerServicePin = pin;
-        dealerPinExpiryTimestamp = now + DEALER_PIN_CACHE_TTL;
-        logger.info('✅ Successfully fetched and cached dealer service PIN from Firestore.');
-        return pin;
-
-    } catch (error) {
-        logger.error('❌ Failed to retrieve dealer service PIN from Firestore:', {
-            message: error.message,
-            stack: error.stack
-        });
-        throw new Error(`Failed to retrieve dealer service PIN: ${error.message}`);
-    }
-}
-
-
-// NEW: Function to get Safaricom Dealer API access token with caching
-async function getCachedAirtimeToken() {
-    const now = Date.now();
-    if (cachedAirtimeToken && now < tokenExpiryTimestamp) {
-        logger.info('🔑 Using cached dealer token.');
-        return cachedAirtimeToken;
-    }
-    try {
-        const auth = Buffer.from(`${MPESA_AIRTIME_KEY}:${MPESA_AIRTIME_SECRET}`).toString('base64');
-        const response = await axios.post(
-            MPESA_GRANT_URL,
-            {},
-            {
-                headers: {
-                    Authorization: `Basic ${auth}`,
-                    'Content-Type': 'application/json',
-                },
+        const response = await axios.get('https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials', {
+            headers: {
+                'Authorization': `Basic ${auth}`
             }
-        );
-        const token = response.data.access_token;
-        cachedAirtimeToken = token;
-        tokenExpiryTimestamp = now + 3599 * 1000; 
-        logger.info('✅ Fetched new dealer token.');
-        return token;
-    } catch (error) {
-        logger.error('❌ Failed to get Safaricom airtime token:', {
-            message: error.message,
-            response_data: error.response ? error.response.data : 'N/A',
-            stack: error.stack
         });
-        throw new Error('Failed to obtain Safaricom airtime token.');
+        return response.data.access_token;
+    } catch (error) {
+        logger.error('Error getting access token:', error.message);
+        throw new Error('Failed to get M-Pesa access token.');
     }
 }
 
-// NEW: Carrier detection helper
+// Function to generate the timestamp for M-Pesa API
+function generateTimestamp() {
+    const date = new Date();
+    const year = date.getFullYear().toString();
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const day = date.getDate().toString().padStart(2, '0');
+    const hour = date.getHours().toString().padStart(2, '0');
+    const minute = date.getMinutes().toString().padStart(2, '0');
+    const second = date.getSeconds().toString().padStart(2, '0');
+    return `${year}${month}${day}${hour}${minute}${second}`;
+}
+
+// Function to generate password for STK Push
+function generatePassword(shortcode, passkey, timestamp) {
+    const str = shortcode + passkey + timestamp;
+    return Buffer.from(str).toString('base64');
+}
+
+// Placeholder for detecting carrier (You already have this in your C2B handler)
 function detectCarrier(phoneNumber) {
     const normalized = phoneNumber.replace(/^(\+254|254)/, '0').trim();
     if (normalized.length !== 10 || !normalized.startsWith('0')) {
@@ -260,622 +161,294 @@ function detectCarrier(phoneNumber) {
     return 'Unknown';
 }
 
-// NEW: Normalize phone number for Safaricom Dealer API (7XXXXXXXX format)
-function normalizeReceiverPhoneNumber(num) {
-    let normalized = String(num).replace(/^(\+254|254)/, '0').trim();
-    if (normalized.startsWith('0') && normalized.length === 10) {
-        return normalized.slice(1); // Converts '0712345678' to '712345678'
-    }
-    if (normalized.length === 9 && !normalized.startsWith('0')) {
-        return normalized;
-    }
-    logger.warn(`Phone number could not be normalized to 7XXXXXXXX format for Safaricom: ${num}. Returning as is.`);
-    return num; // Return as is, let the API potentially fail for incorrect format
-}
-
-// NEW: Send Safaricom dealer airtime
-async function sendSafaricomAirtime(receiverNumber, amount) {
+// Placeholder for updating carrier float balance on your analytics/float management server
+// This is called by the STK Callback to deduct the amount received from the customer.
+// The fulfillment process will handle the actual float deductions for airtime dispatch.
+async function updateCarrierFloatBalance(floatName, amount) {
+    logger.info(`Attempting to update float balance for ${floatName} by ${amount}`);
     try {
-        const token = await getCachedAirtimeToken();
-        const normalizedReceiver = normalizeReceiverPhoneNumber(receiverNumber);
-        const adjustedAmount = Math.round(amount * 100); // Amount in cents
-
-        if (!DEALER_SENDER_MSISDN || !MPESA_AIRTIME_URL) {
-            const missingEnvError = 'Missing Safaricom Dealer API environment variables (DEALER_SENDER_MSISDN, MPESA_AIRTIME_URL). DEALER_SERVICE_PIN is now fetched from Firestore.';
-            logger.error(missingEnvError);
-            return { status: 'FAILED', message: missingEnvError };
-        }
-
-        const rawDealerPin = await getDealerServicePin();
-        const servicePin = await generateServicePin(rawDealerPin);
-
-        const body = {
-            senderMsisdn: DEALER_SENDER_MSISDN,
-            amount: adjustedAmount,
-            servicePin: servicePin,
-            receiverMsisdn: normalizedReceiver,
-        };
-
-        const response = await axios.post(
-            MPESA_AIRTIME_URL,
-            body,
-            {
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                    'Content-Type': 'application/json',
-                },
-            }
-        );
-
-        let safaricomInternalTransId = null;
-        let newSafaricomFloatBalance = null;
-
-        const isSuccess = response.data && response.data.responseStatus === '200';
-
-        if (response.data && response.data.responseDesc) {
-            const desc = response.data.responseDesc;
-            const idMatch = desc.match(/^(R\d{6}\.\d{4}\.\d{6})/); 
-            if (idMatch && idMatch[1]) {
-                safaricomInternalTransId = idMatch[1];
-            }
-            const balanceMatch = desc.match(/New balance is Ksh\. (\d+\.\d{2})/); 
-            if (balanceMatch && balanceMatch[1]) {
-                newSafaricomFloatBalance = parseFloat(balanceMatch[1]);
-            }
-        }
-
-        // Always log the full response from Safaricom for debugging purposes
-        logger.info('✅ Safaricom dealer airtime API response:', { receiver: normalizedReceiver, amount: amount, response_data: response.data });
-
-        if (isSuccess) {
-            return {
-                status: 'SUCCESS',
-                message: 'Safaricom airtime sent',
-                data: response.data,
-                safaricomInternalTransId: safaricomInternalTransId,
-                newSafaricomFloatBalance: newSafaricomFloatBalance,
-            };
-        } else {
-            // If the status code indicates failure, return FAILED
-            const errorMessage = `Safaricom Dealer API reported failure (Status: ${response.data.responseStatus || 'N/A'}): ${response.data.responseDesc || 'Unknown reason'}`;
-            logger.warn(`⚠️ Safaricom dealer airtime send reported non-success:`, {
-                receiver: receiverNumber,
-                amount: amount,
-                response_data: response.data,
-                errorMessage: errorMessage
-            });
-            return {
-                status: 'FAILED',
-                message: errorMessage,
-                error: response.data, 
-            };
-        }
-    } catch (error) {
-        logger.error('❌ Safaricom dealer airtime send failed (exception caught):', {
-            receiver: receiverNumber,
-            amount: amount,
-            message: error.message,
-            response_data: error.response ? error.response.data : 'N/A',
-            stack: error.stack
+        // This should hit your Analytics Server's endpoint for float adjustments
+        const response = await axios.post(`${ANALYTICS_SERVER_URL}/api/update-float`, {
+            floatName: floatName,
+            amount: amount
         });
-        return {
-            status: 'FAILED',
-            message: 'Safaricom airtime send failed due to network/API error',
-            error: error.response ? error.response.data : error.message,
-        };
+        logger.info(`Float update response for ${floatName}:`, response.data);
+        return { success: true, data: response.data };
+    } catch (error) {
+        logger.error(`Error updating float balance for ${floatName}:`, error.message);
+        return { success: false, message: error.message };
     }
 }
 
-// NEW: Function to send Africa's Talking Airtime
-async function sendAfricasTalkingAirtime(phoneNumber, amount, carrier) {
-    let normalizedPhone = phoneNumber;
-
-    // AT expects E.164 format (+254XXXXXXXXX)
-    if (phoneNumber.startsWith('0')) {
-        normalizedPhone = '+254' + phoneNumber.slice(1);
-    } else if (phoneNumber.startsWith('254') && !phoneNumber.startsWith('+')) {
-        normalizedPhone = '+' + phoneNumber;
-    } else if (!phoneNumber.startsWith('+254')) {
-        logger.error('[sendAfricasTalkingAirtime] Invalid phone format:', { phoneNumber: phoneNumber });
-        return {
-            status: 'FAILED',
-            message: 'Invalid phone number format for Africa\'s Talking',
-            details: {
-                error: 'Phone must start with +254, 254, or 0'
-            }
-        };
-    }
-
-    if (!AT_API_KEY || !AT_USERNAME) {
-        logger.error('Missing Africa\'s Talking API environment variables.');
-        return { status: 'FAILED', message: 'Missing Africa\'s Talking credentials.' };
-    }
-
-    try {
-        const result = await africastalking.AIRTIME.send({
-            recipients: [{
-                phoneNumber: normalizedPhone,
-                amount: amount,
-                currencyCode: 'KES'
-            }]
-        });
-
-        // Defensive check
-        const response = result?.responses?.[0];
-        const status = response?.status;
-        const errorMessage = response?.errorMessage;
-
-        if (status === 'Sent' && errorMessage === 'None') {
-            logger.info(`✅ Africa's Talking airtime successfully sent to ${carrier}:`, {
-                recipient: normalizedPhone,
-                amount: amount,
-                at_response: result
-            });
-            return {
-                status: 'SUCCESS',
-                message: 'Africa\'s Talking airtime sent',
-                data: result,
-            };
-        } else {
-            logger.error(`❌ Africa's Talking airtime send indicates non-success for ${carrier}:`, {
-                recipient: normalizedPhone,
-                amount: amount,
-                at_response: result
-            });
-            return {
-                status: 'FAILED',
-                message: 'Africa\'s Talking airtime send failed or not successful.',
-                error: result,
-            };
-        }
-
-    } catch (error) {
-        logger.error(`❌ Africa's Talking airtime send failed for ${carrier} (exception caught):`, {
-            recipient: normalizedPhone,
-            amount: amount,
-            message: error.message,
-            stack: error.stack
-        });
-        return {
-            status: 'FAILED',
-            message: 'Africa\'s Talking airtime send failed (exception)',
-            error: error.message,
-        };
-    }
-}
-
-
-// --- Routes ---
-
-// STK Push initiation endpoint
-app.post('/stk-push', async (req, res) => {
-    const { phone_number, amount } = req.body; // Remove 'carrier' from req.body, detect it
-    const now = admin.firestore.FieldValue.serverTimestamp();
-
-    if (!phone_number || !amount) {
-        return res.status(400).json({ success: false, message: 'Missing phone_number or amount.' });
-    }
-
-    // NEW: Detect carrier dynamically
-    const carrier = detectCarrier(phone_number);
-    if (carrier === 'Unknown') {
-        logger.warn(`STK Push request with unknown carrier for phone number: ${phone_number}`);
-        return res.status(400).json({ success: false, message: 'Unknown or unsupported carrier for provided phone number.' });
-    }
-    logger.info(`Detected carrier for ${phone_number}: ${carrier}`);
-
-    try {
-        const token = await getAccessToken(); // M-Pesa STK Push Token
-        const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
-        const password = Buffer.from(`${BUSINESS_SHORT_CODE}${PASSKEY}${timestamp}`).toString('base64');
-        const transactionRef = db.collection('transactions').doc(); // Auto-generate ID
-
-        const stkPushPayload = {
-            BusinessShortCode: BUSINESS_SHORT_CODE,
-            Password: password,
-            Timestamp: timestamp,
-            TransactionType: 'CustomerPayBillOnline', 
-            Amount: amount,
-            PartyA: phone_number,
-            PartyB: BUSINESS_SHORT_CODE,
-            PhoneNumber: phone_number,
-            CallBackURL: CALLBACK_URL,
-            AccountReference: transactionRef.id, 
-            TransactionDesc: `Airtime Top-up for ${phone_number} on ${carrier}`
-        };
-
-        logger.info('Sending STK Push with payload:', stkPushPayload);
-
-        const response = await axios.post(SAFARICOM_STK_PUSH_URL, stkPushPayload, {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
-            }
-        });
-
-        // Save initial transaction state to Firestore
-        await transactionRef.set({
-            checkoutRequestID: response.data.CheckoutRequestID,
-            merchantRequestID: response.data.MerchantRequestID,
-            responseCode: response.data.ResponseCode,
-            responseDescription: response.data.ResponseDescription,
-            customerMessage: response.data.CustomerMessage,
-            status: 'PENDING_MPESA_PAYMENT', // Initial status
-            recipient: phone_number,
-            amount: parseFloat(amount),
-            carrier: carrier, // Store detected carrier
-            createdAt: now,
-            lastUpdated: now,
-            type: 'STK_PUSH_AIRTIME_TOPUP',
-            reconciliationNeeded: false,
-            primaryProviderUsed: null,
-            secondaryProviderAttempted: false,
-        });
-
-        // Also save to sales collection with initial pending status
-        await salesCollection.doc(response.data.CheckoutRequestID).set({
-            checkoutRequestID: response.data.CheckoutRequestID,
-            recipient: phone_number,
-            amount: parseFloat(amount),
-            carrier: carrier, // Store detected carrier
-            status: 'PENDING_MPESA_PAYMENT',
-            createdAt: now,
-            lastUpdated: now,
-            type: 'AIRTIME_SALE_ONLINE',
-            mpesaResultCode: null,
-            mpesaResultDesc: null,
-            airtimeResult: null,
-            bonus: 0,
-            commission_rate: 0, 
-            total_sent: parseFloat(amount), 
-            reconciliationNeeded: false,
-            providerUsed: null,
-            secondaryProviderAttempted: false,
-        });
-
-
-        res.json({
-            success: true,
-            message: 'STK Push initiated successfully.',
-            data: response.data,
-            firestoreDocId: transactionRef.id 
-        });
-
-    } catch (error) {
-        logger.error('Error initiating STK Push:', error.response ? error.response.data : error.message);
-
-        // Log error to errorsCollection
-        await errorsCollection.add({
-            type: 'STK_PUSH_INITIATION_ERROR',
-            error: error.response ? error.response.data : error.message,
-            requestBody: req.body,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-
-        res.status(500).json({
-            success: false,
-            message: 'Failed to initiate STK Push.',
-            error: error.response ? error.response.data : error.message
-        });
-    }
+// --- RATE LIMITING ---
+const stkPushLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 20, // Limit each IP to 20 requests per window
+    message: 'Too many STK Push requests from this IP, please try again after a minute.',
+    statusCode: 429,
+    headers: true,
 });
 
 const stkCallbackRateLimiter = rateLimit({
-    windowMs: 5 * 60 * 1000, // 5 minutes
-    max: 20, 
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: 'Too many STK callbacks from this source. Try again later.' },
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 100, // M-Pesa can send multiple retries
+    message: 'Too many STK Callback requests, please try again later.',
+    statusCode: 429,
+    headers: true,
 });
 
-// M-Pesa STK Callback Handler
+
+// --- ENDPOINTS ---
+
+// 1. STK Push Initiation Endpoint
+app.post('/stk-push', stkPushLimiter, async (req, res) => {
+    const { amount, phoneNumber, recipient } = req.body; // recipient is the number to top up
+
+    if (!amount || !phoneNumber || !recipient) {
+        return res.status(400).json({ success: false, message: 'Missing required parameters: amount, phoneNumber, recipient.' });
+    }
+
+    const timestamp = generateTimestamp();
+    const password = generatePassword(SHORTCODE, PASSKEY, timestamp);
+    const checkoutRequestID = `STK-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`; // Unique ID for our system
+
+    logger.info(`Initiating STK Push for recipient: ${recipient}, amount: ${amount}, customer: ${phoneNumber}`);
+
+    try {
+        const accessToken = await getAccessToken();
+        const detectedCarrier = detectCarrier(recipient); // Detect carrier at initiation
+
+        // --- Create initial request document in salesCollection ---
+        // This document will be updated by the STK callback
+        // and later by the fulfillment process.
+        await salesCollection.doc(checkoutRequestID).set({
+            saleId: checkoutRequestID, // Use checkoutRequestID as saleId for this stage
+            initiatorPhoneNumber: phoneNumber, // The phone number initiating the STK push
+            recipient: recipient, // The number to top up
+            amount: parseFloat(amount), // Original amount requested by customer
+            carrier: detectedCarrier, // Detected carrier for the recipient
+            mpesaPaymentStatus: 'PENDING_MPESA_CONFIRMATION', // Initial status
+            createdAt: FieldValue.serverTimestamp(),
+            lastUpdated: FieldValue.serverTimestamp(),
+            type: 'STK_PUSH_REQUEST', // Distinguish from fulfilled sales
+            // Other fields will be added by the callback and fulfillment logic
+        });
+        logger.info(`✅ Initial sale request document ${checkoutRequestID} created.`);
+
+
+        const stkPushResponse = await axios.post('https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest', {
+            BusinessShortCode: SHORTCODE,
+            Password: password,
+            Timestamp: timestamp,
+            TransactionType: 'CustomerPayBillOnline', // Or 'CustomerBuyGoodsOnline' if applicable
+            Amount: amount,
+            PartyA: phoneNumber, // Customer's phone number
+            PartyB: SHORTCODE, // Your Paybill/Till number
+            PhoneNumber: phoneNumber, // Customer's phone number
+            CallBackURL: STK_CALLBACK_URL,
+            AccountReference: recipient, // Use recipient number as account reference
+            TransactionDesc: `Airtime for ${recipient}`
+        }, {
+            headers: {
+                'Authorization': `Bearer ${accessToken}`
+            }
+        });
+
+        logger.info('STK Push Request Sent:', stkPushResponse.data);
+
+        // Update the initial request document with M-Pesa response
+        await salesCollection.doc(checkoutRequestID).update({
+            mpesaResponse: stkPushResponse.data,
+            lastUpdated: FieldValue.serverTimestamp()
+        });
+        logger.info(`✅ Initial sale request document ${checkoutRequestID} updated with STK Push response.`);
+
+        res.status(200).json({ success: true, message: 'STK Push initiated successfully.', data: stkPushResponse.data });
+
+    } catch (error) {
+        logger.error('❌ Error during STK Push initiation:', {
+            message: error.message,
+            stack: error.stack,
+            requestBody: req.body
+        });
+
+        const errorMessage = error.response ? error.response.data : error.message;
+
+        // Log the error
+        await errorsCollection.add({
+            type: 'STK_PUSH_INITIATION_ERROR',
+            error: errorMessage,
+            requestBody: req.body,
+            createdAt: FieldValue.serverTimestamp(),
+        });
+
+        res.status(500).json({ success: false, message: 'Failed to initiate STK Push.', error: errorMessage });
+    }
+});
+
+
+// 2. M-Pesa STK Callback Endpoint (where M-Pesa sends payment confirmation)
 app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
     const callback = req.body;
-    const now = admin.firestore.FieldValue.serverTimestamp();
+    const now = FieldValue.serverTimestamp();
 
     logger.info('📞 Received STK Callback:', JSON.stringify(callback));
 
     const resultCode = callback.Body.stkCallback.ResultCode;
-    const checkoutRequestID = callback.Body.stkCallback.CheckoutRequestID;
-    const mpesaReceiptNumber = callback.Body.stkCallback.CallbackMetadata?.Item.find(item => item.Name === 'MpesaReceiptNumber')?.Value || null;
-    const transactionDateFromMpesa = callback.Body.stkCallback.CallbackMetadata?.Item.find(item => item.Name === 'TransactionDate')?.Value || null;
-    const phoneNumberUsedForPayment = callback.Body.stkCallback.CallbackMetadata?.Item.find(item => item.Name === 'PhoneNumber')?.Value || null;
-    const amountPaidByCustomer = callback.Body.stkCallback.CallbackMetadata?.Item.find(item => item.Name === 'Amount')?.Value || null;
+    const checkoutRequestID = callback.Body.stkCallback.CheckoutRequestID; // This will be the transactionID for consistency
 
-    const salesDocRef = salesCollection.doc(checkoutRequestID); 
-    const salesDoc = await salesDocRef.get();
+    // --- REPLACED OPTIONAL CHAINING HERE ---
+    let mpesaReceiptNumber = null;
+    let transactionDateFromMpesa = null;
+    let phoneNumberUsedForPayment = null;
+    let amountPaidByCustomer = null;
 
-    if (!salesDoc.exists) {
-        logger.error('❌ No matching transaction (sales collection) for CheckoutRequestID in Firestore:', checkoutRequestID);
-        await errorsCollection.doc(`STK_CALLBACK_NO_TX_SALES_${checkoutRequestID}_${Date.now()}`).set({
+    const callbackMetadata = callback.Body.stkCallback.CallbackMetadata;
+    if (callbackMetadata && Array.isArray(callbackMetadata.Item)) {
+        const receiptItem = callbackMetadata.Item.find(item => item.Name === 'MpesaReceiptNumber');
+        if (receiptItem) {
+            mpesaReceiptNumber = receiptItem.Value;
+        }
+
+        const dateItem = callbackMetadata.Item.find(item => item.Name === 'TransactionDate');
+        if (dateItem) {
+            transactionDateFromMpesa = dateItem.Value;
+        }
+
+        const phoneItem = callbackMetadata.Item.find(item => item.Name === 'PhoneNumber');
+        if (phoneItem) {
+            phoneNumberUsedForPayment = phoneItem.Value;
+        }
+
+        const amountItem = callbackMetadata.Item.find(item => item.Name === 'Amount');
+        if (amountItem) {
+            amountPaidByCustomer = amountItem.Value;
+        }
+    }
+    // --- END REPLACED OPTIONAL CHAINING ---
+
+    // Retrieve the initial sales request document
+    const initialSalesRequestDocRef = salesCollection.doc(checkoutRequestID);
+    const initialSalesRequestDoc = await initialSalesRequestDocRef.get();
+
+    if (!initialSalesRequestDoc.exists) {
+        logger.error('❌ No matching initial sales request for CheckoutRequestID in Firestore:', checkoutRequestID);
+        await errorsCollection.doc(`STK_CALLBACK_NO_INITIAL_REQUEST_${checkoutRequestID}_${Date.now()}`).set({
             type: 'STK_CALLBACK_ERROR',
-            error: 'No matching transaction found in salesCollection for CheckoutRequestID.',
+            error: 'No matching initial sales request found for CheckoutRequestID. Cannot process callback.',
             checkoutRequestID: checkoutRequestID,
             callbackData: callback,
             createdAt: now,
         });
-        return res.json({ resultCode: 0, resultDesc: 'No matching transaction found locally for this callback.' });
+        return res.json({ ResultCode: 0, ResultDesc: 'Callback received, but initial transaction request not found locally.' });
     }
 
-    const txData = salesDoc.data(); 
-    const { recipient: topupNumber, amount: originalAmount, carrier } = txData; 
+    const initialRequestData = initialSalesRequestDoc.data();
+    const topupNumber = initialRequestData.recipient; // Get recipient from initial request
+    const carrier = initialRequestData.carrier; // Get carrier from initial request
 
-    let finalTxStatus = 'FAILED';
-    let finalSalesStatus = 'FAILED';
-    let airtimeResult = null;
-    let bonusAmount = 0; 
-    let commissionRate = 0; 
-    let finalAmountToDispatch = originalAmount; 
-    let needsReconciliation = false;
-    let providerUsed = null; 
-    let secondaryProviderAttempted = false; 
+    let finalTransactionStatus; // Reflects payment outcome and initial fulfillment state
+    let needsReconciliation = false; // For payment processing errors (e.g., analytics update failed)
 
-    // Determine the status based on M-Pesa ResultCode
+    // Reference to the 'transactions' document (using checkoutRequestID as its ID)
+    const transactionDocRef = transactionsCollection.doc(checkoutRequestID);
+
     if (resultCode === 0) {
-        logger.info(`✅ M-Pesa payment successful for ${checkoutRequestID}. Attempting airtime dispatch.`);
+        // M-Pesa payment was successful
+        logger.info(`✅ M-Pesa payment successful for ${checkoutRequestID}. Marking for fulfillment.`);
+        finalTransactionStatus = 'RECEIVED_PENDING_FULFILLMENT'; // Unified status
 
+        // Create or update the transaction record with initial details
+        await transactionDocRef.set({
+            transactionID: checkoutRequestID, // M-Pesa's unique ID for this transaction
+            type: 'STK_PUSH_PAYMENT', // Explicitly mark as STK Push
+            transactionTime: transactionDateFromMpesa, // M-Pesa's timestamp
+            amountReceived: amountPaidByCustomer ? parseFloat(amountPaidByCustomer) : null, // Actual amount paid
+            mpesaReceiptNumber: mpesaReceiptNumber, // M-Pesa receipt
+            payerMsisdn: phoneNumberUsedForPayment,
+            // payerName: initialRequestData.customerName || null, // If you capture this at initiation
+            billRefNumber: topupNumber, // The recipient number for airtime
+            carrier: carrier, // The carrier for the recipient
+            mpesaRawCallback: callback, // Full M-Pesa callback data
+            status: finalTransactionStatus, // Set to pending fulfillment
+            fulfillmentStatus: 'PENDING', // Initial fulfillment status
+            mpesaResultCode: resultCode,
+            mpesaResultDesc: callback.Body.stkCallback.ResultDesc,
+            createdAt: initialRequestData.createdAt || now, // Use initial request timestamp if available
+            lastUpdated: now,
+            relatedSaleId: checkoutRequestID, // Link to the existing sales request doc
+            reconciliationNeeded: false, // Assume not needed initially for payment processing
+        }, { merge: true }); // Use merge to avoid overwriting if doc already exists from initial request logging
+        logger.info(`✅ [transactions] Record for ${checkoutRequestID} created/updated with status: ${finalTransactionStatus}`);
+
+        // --- Notify Analytics Server for float deduction (customer's payment received) ---
         try {
-            const bonusDocSnap = await airtimeBonusesDocRef.get(); 
-
-            if (!bonusDocSnap.exists) {
-                logger.warn('Bonus settings document does not exist (airtime_bonuses/current_settings). Skipping bonus application.');
-            }
-
-            const safaricomBonusPercentage = bonusDocSnap?.data()?.safaricomPercentage ?? 0;
-            const atBonusPercentage = bonusDocSnap?.data()?.africastalkingPercentage ?? 0;
-
-
-            // Custom rounding: 0.1–0.4 => 0, 0.5–0.9 => 1
-            const customRound = (value) => {
-                const decimalPart = value % 1;
-                const integerPart = Math.floor(value);
-                return decimalPart >= 0.5 ? integerPart + 1 : integerPart;
+            logger.info(`Attempting to notify Analytics Server for payment ${checkoutRequestID} (type: PAYMENT_RECEIVED)...`);
+            const analyticsPayload = {
+                transactionId: checkoutRequestID,
+                amount: amountPaidByCustomer ? parseFloat(amountPaidByCustomer) : 0, // Amount customer paid
+                status: 'PAYMENT_RECEIVED', // Report only payment receipt
+                carrier: carrier, // The carrier for the airtime recipient
+                type: 'STK_PUSH_PAYMENT',
+                mpesaReceiptNumber: mpesaReceiptNumber,
+                payerMsisdn: phoneNumberUsedForPayment,
+                // fulfillment-related fields are not set here:
+                bonusAmount: 0,
+                commissionRate: 0,
+                amountDispatched: 0,
+                providerUsed: null
             };
+            const analyticsResponse = await axios.post(`${ANALYTICS_SERVER_URL}/api/process-airtime-purchase`, analyticsPayload);
+            logger.info(`✅ Analytics Server response for float adjustment (payment received):`, analyticsResponse.data);
 
-            // Apply bonus with optional rounding
-            const applyBonus = (percentage, label, round = false) => {
-                const rawBonus = originalAmount * (percentage / 100);
-                const bonus = round ? customRound(rawBonus) : parseFloat(rawBonus.toFixed(2)); // Ensure rawBonus is rounded to 2 decimal places for storage
-                const total = originalAmount + bonus;
-                logger.info(
-                    `Applying ${percentage}% ${label} bonus. Original: ${originalAmount}, Bonus: ${bonus} (${round ? 'rounded' : 'raw'}), Final: ${total}`
-                );
-                return { total, bonus, percentage }; // Return percentage as commissionRate
-            };
-
-            // Normalize carrier name to lowercase
-            const carrierNormalized = carrier?.toLowerCase();
-
-            if (carrierNormalized === 'safaricom' && safaricomBonusPercentage > 0) {
-                const result = applyBonus(safaricomBonusPercentage, 'Safaricom', false); // No rounding for Safaricom
-                finalAmountToDispatch = result.total;
-                bonusAmount = result.bonus;
-                commissionRate = result.percentage;
-            } else if (['airtel', 'telkom', 'equitel', 'faiba'].includes(carrierNormalized) && atBonusPercentage > 0) {
-                const result = applyBonus(atBonusPercentage, 'AfricasTalking', true); // Use custom rounding for AT
-                finalAmountToDispatch = result.total;
-                bonusAmount = result.bonus;
-                commissionRate = result.percentage;
-            }
-
-            logger.info(`Final amount to dispatch: ${finalAmountToDispatch}`);
-
-
-            // --- Proceed with Airtime Dispatch (with finalAmountToDispatch) ---
-            if (carrier === 'Safaricom') {
-                // --- Primary attempt: Safaricom Dealer API for Safaricom numbers ---
-                try {
-                    airtimeResult = await sendSafaricomAirtime(topupNumber, finalAmountToDispatch); // Use finalAmountToDispatch
-                    if (airtimeResult && airtimeResult.status === 'SUCCESS') { // Updated to check for 'SUCCESS'
-                        finalTxStatus = 'COMPLETED';
-                        finalSalesStatus = 'COMPLETED';
-                        providerUsed = 'SafaricomDealerAPI';
-                        logger.info(`✅ Safaricom airtime sent successfully via Safaricom Dealer API for ${checkoutRequestID}.`);
-                    } else {
-                        logger.warn(`⚠️ Safaricom Dealer API failed or returned non-SUCCESS status for ${checkoutRequestID}. Attempting Africa's Talking as fallback.`);
-                        await errorsCollection.doc(`SAF_API_PRIMARY_FAIL_${checkoutRequestID}`).set({
-                            type: 'AIRTIME_SEND_ERROR',
-                            subType: 'SAFARICOM_PRIMARY_API_FAILURE',
-                            error: `Safaricom API (primary) returned non-SUCCESS status: ${JSON.stringify(airtimeResult)}`,
-                            transactionCode: checkoutRequestID,
-                            originalAmount: originalAmount,
-                            amountDispatched: finalAmountToDispatch, // Log actual amount attempted
-                            airtimeResponse: airtimeResult,
-                            callbackData: callback,
-                            createdAt: now,
-                        });
-                        secondaryProviderAttempted = true; // Mark that we are attempting fallback
-                    }
-                } catch (safPrimaryError) {
-                    logger.error(`❌ Exception during Safaricom Dealer API call for ${checkoutRequestID}:`, safPrimaryError.message);
-                    await errorsCollection.doc(`SAF_API_PRIMARY_EXCEPTION_${checkoutRequestID}`).set({
-                        type: 'AIRTIME_SEND_ERROR',
-                        subType: 'SAFARICOM_PRIMARY_API_EXCEPTION',
-                        error: `Exception during Safaricom API (primary) call: ${safPrimaryError.message}`,
-                        transactionCode: checkoutRequestID,
-                        originalAmount: originalAmount,
-                        amountDispatched: finalAmountToDispatch, // Log actual amount attempted
-                        stack: safPrimaryError.stack,
-                        callbackData: callback,
-                        createdAt: now,
-                    });
-                    secondaryProviderAttempted = true; // Mark that we are attempting fallback
-                }
-
-                // --- Secondary attempt: Africa's Talking for Safaricom numbers (if primary failed) ---
-                if (finalSalesStatus !== 'COMPLETED' && secondaryProviderAttempted) { // Only attempt if primary failed
-                    try {
-                        logger.info(`Attempting Africa's Talking as fallback for Safaricom number ${topupNumber}...`);
-                        airtimeResult = await sendAfricasTalkingAirtime(topupNumber, finalAmountToDispatch, carrier); // Use finalAmountToDispatch
-                        if (airtimeResult && airtimeResult.status === 'SUCCESS') {
-                            finalTxStatus = 'COMPLETED';
-                            finalSalesStatus = 'COMPLETED';
-                            providerUsed = 'AfricasTalking'; // Update to the one that succeeded
-                            logger.info(`✅ Safaricom airtime sent successfully via Africa's Talking fallback for ${checkoutRequestID}.`);
-                        } else {
-                            logger.error(`❌ Africa's Talking fallback also failed for Safaricom number ${checkoutRequestID}:`, airtimeResult);
-                            finalTxStatus = 'AIRTIME_FAILED_CUSTOMER_PAID'; // Specific status: Customer paid, but airtime failed
-                            finalSalesStatus = 'AIRTIME_FAILED_CUSTOMER_PAID';
-                            needsReconciliation = true; // Mark for reconciliation
-                            await errorsCollection.doc(`SAF_AT_FALLBACK_FAIL_${checkoutRequestID}`).set({
-                                type: 'AIRTIME_SEND_ERROR',
-                                subType: 'AFRICASTALKING_FALLBACK_FAILURE',
-                                error: `Africa's Talking fallback returned non-SUCCESS status or unsuccessful for Safaricom: ${JSON.stringify(airtimeResult)}`,
-                                transactionCode: checkoutRequestID,
-                                originalAmount: originalAmount,
-                                amountDispatched: finalAmountToDispatch, // Log actual amount attempted
-                                airtimeResponse: airtimeResult,
-                                callbackData: callback,
-                                createdAt: now,
-                            });
-                        }
-                    } catch (atFallbackError) {
-                        logger.error(`❌ Exception during Africa's Talking fallback call for Safaricom number ${checkoutRequestID}:`, atFallbackError.message);
-                        finalTxStatus = 'AIRTIME_FAILED_RUNTIME_EXCEPTION'; // General runtime exception
-                        finalSalesStatus = 'AIRTIME_FAILED_RUNTIME_EXCEPTION';
-                        needsReconciliation = true; // Mark for reconciliation
-                        await errorsCollection.doc(`SAF_AT_FALLBACK_EXCEPTION_${checkoutRequestID}`).set({
-                            type: 'AIRTIME_SEND_ERROR',
-                            subType: 'AFRICASTALKING_FALLBACK_EXCEPTION',
-                            error: `Exception during Africa's Talking fallback call for Safaricom: ${atFallbackError.message}`,
-                            transactionCode: checkoutRequestID,
-                            originalAmount: originalAmount,
-                            amountDispatched: finalAmountToDispatch, // Log actual amount attempted
-                            stack: atFallbackError.stack,
-                            callbackData: callback,
-                            createdAt: now,
-                        });
-                    }
-                }
-            } else if (['airtel', 'telkom', 'faiba', 'equitel'].includes(carrierNormalized)) { // Use normalized carrier
-                // --- For other carriers, only use Africa's Talking ---
-                try {
-                    airtimeResult = await sendAfricasTalkingAirtime(topupNumber, finalAmountToDispatch, carrier); // Use finalAmountToDispatch
-                    if (airtimeResult && airtimeResult.status === 'SUCCESS') {
-                        finalTxStatus = 'COMPLETED';
-                        finalSalesStatus = 'COMPLETED';
-                        providerUsed = 'AfricasTalking';
-                        logger.info(`✅ Airtime sent successfully via Africa's Talking for ${carrier} number ${checkoutRequestID}.`);
-                    } else {
-                        logger.error(`❌ Africa's Talking airtime send failed for ${carrier} number ${checkoutRequestID}:`, airtimeResult);
-                        finalTxStatus = 'AIRTIME_FAILED_CUSTOMER_PAID'; // Specific status: Customer paid, but airtime failed
-                        finalSalesStatus = 'AIRTIME_FAILED_CUSTOMER_PAID';
-                        needsReconciliation = true; // Mark for reconciliation
-                        await errorsCollection.doc(`AT_API_FAIL_${checkoutRequestID}`).set({
-                            type: 'AIRTIME_SEND_ERROR',
-                            subType: 'AFRICASTALKING_API_FAILURE',
-                            error: `Africa's Talking API returned non-SUCCESS status or unsuccessful for ${carrier}: ${JSON.stringify(airtimeResult)}`,
-                            transactionCode: checkoutRequestID,
-                            originalAmount: originalAmount,
-                            amountDispatched: finalAmountToDispatch, // Log actual amount attempted
-                            airtimeResponse: airtimeResult,
-                            callbackData: callback,
-                            createdAt: now,
-                        });
-                    }
-                } catch (atError) {
-                    logger.error(`❌ Exception during Africa's Talking call for ${carrier} number ${checkoutRequestID}:`, atError.message);
-                    finalTxStatus = 'AIRTIME_FAILED_RUNTIME_EXCEPTION'; // General runtime exception
-                    finalSalesStatus = 'AIRTIME_FAILED_RUNTIME_EXCEPTION';
-                    needsReconciliation = true; // Mark for reconciliation
-                    await errorsCollection.doc(`AT_API_EXCEPTION_${checkoutRequestID}`).set({
-                        type: 'AIRTIME_SEND_ERROR',
-                        subType: 'AFRICASTALKING_API_EXCEPTION',
-                        error: `Exception during Africa's Talking API call for ${carrier}: ${atError.message}`,
-                        transactionCode: checkoutRequestID,
-                        originalAmount: originalAmount,
-                        amountDispatched: finalAmountToDispatch, // Log actual amount attempted
-                        stack: atError.stack,
-                        callbackData: callback,
-                        createdAt: now,
-                    });
-                }
-            } else {
-                logger.warn(`⚠️ Airtime top-up not supported for carrier: ${carrier}. Marking for reconciliation.`);
-                airtimeResult = { error: 'Unsupported carrier for airtime top-up.' };
-                finalTxStatus = 'AIRTIME_FAILED_UNSUPPORTED_CARRIER'; // Customer paid, unsupported carrier
-                finalSalesStatus = 'AIRTIME_FAILED_UNSUPPORTED_CARRIER';
-                needsReconciliation = true; // Mark for reconciliation
-
-                await errorsCollection.doc(`UNSUPPORTED_CARRIER_ONLINE_${checkoutRequestID}`).set({
-                    type: 'AIRTIME_SEND_ERROR',
-                    subType: 'UNSUPPORTED_CARRIER',
-                    error: `Airtime top-up not supported for carrier: ${carrier}.`,
-                    transactionCode: checkoutRequestID,
-                    callbackData: callback,
-                    createdAt: now,
-                });
-            }
-
-            // --- Call Analytics Server for float deduction/adjustment ---
-            try {
-                logger.info(`Attempting to notify Analytics Server for transaction ${checkoutRequestID} with status: ${finalSalesStatus}...`);
-                const analyticsPayload = {
-                    amount: finalAmountToDispatch, // This is the amount actually *attempted* to be sent
-                    status: finalSalesStatus, // Crucially, send the actual outcome status (COMPLETED or FAILED_AIRTIME_SEND)
-                    telco: carrier,
-                    transactionId: checkoutRequestID, // Use CheckoutRequestID as the transaction ID for the analytics server
-                    mpesaReceiptNumber: mpesaReceiptNumber,
-                    originalAmountPaid: originalAmount, // The amount customer paid (before bonus)
-                    bonusAmount: bonusAmount, // The bonus amount applied
-                    commissionRate: commissionRate, // The percentage commission rate used
-                    providerUsed: providerUsed // Send which provider succeeded (or was attempted if failed)
-                };
-                const analyticsResponse = await axios.post(`${ANALYTICS_SERVER_URL}/api/process-airtime-purchase`, analyticsPayload);
-                logger.info(`✅ Analytics Server response for float adjustment:`, analyticsResponse.data);
-
-                // --- Log bonus to bonus_history collection ONLY if COMPLETED AND bonus was applied ---
-                if (finalSalesStatus === 'COMPLETED' && bonusAmount > 0) { // Check bonusAmount > 0 to ensure bonus was calculated
-                    await bonusHistoryCollection.add({
-                        transactionId: checkoutRequestID,
-                        type: 'STK_PUSH_BONUS',
-                        carrier: carrier,
-                        originalAmount: originalAmount,
-                        bonusAmount: bonusAmount,
-                        commissionRate: commissionRate,
-                        createdAt: now,
-                    });
-                    logger.info(`🎁 Bonus of ${bonusAmount} for ${checkoutRequestID} logged.`);
-                } else if (finalSalesStatus === 'COMPLETED' && bonusAmount === 0) {
-                    logger.info(`Transaction ${checkoutRequestID} completed, but no bonus was applied or was zero.`);
-                }
-
-            } catch (deductionError) {
-                logger.error(`❌ Failed to call Analytics Server for float adjustment or bonus logging:`, deductionError.message);
-                await errorsCollection.doc(`ANALYTICS_FLOAT_ADJUST_FAIL_${checkoutRequestID}`).set({
-                    type: 'FLOAT_ADJUSTMENT_API_ERROR',
-                    error: `Failed to communicate with Analytics Server for float adjustment: ${deductionError.message}`,
-                    transactionId: checkoutRequestID,
-                    carrier: carrier,
-                    amount: finalAmountToDispatch, // Amount that was attempted to be dispatched
-                    statusReported: finalSalesStatus,
-                    stack: deductionError.stack,
-                    createdAt: now,
-                });
-                // Even if Analytics Server call fails, we proceed with local updates and reconciliation flag
-            }
-
-        } catch (err) {
-            logger.error('❌ Airtime send failed (exception caught during fulfillment outside specific API calls):', err.message);
-            finalTxStatus = 'AIRTIME_FAILED_RUNTIME_EXCEPTION'; // More specific status
-            finalSalesStatus = 'AIRTIME_FAILED_RUNTIME_EXCEPTION';
-            needsReconciliation = true; // Mark for reconciliation
-            await errorsCollection.doc(`AIRTIME_EXCEPTION_ONLINE_${checkoutRequestID}`).set({
-                type: 'AIRTIME_SEND_ERROR',
-                subType: 'RUNTIME_EXCEPTION_GENERAL',
-                error: err.message,
-                stack: err.stack,
-                transactionCode: checkoutRequestID,
-                callbackData: callback,
+        } catch (deductionError) {
+            logger.error(`❌ Failed to call Analytics Server for float adjustment (payment received) for ${checkoutRequestID}:`, deductionError.message);
+            await errorsCollection.doc(`ANALYTICS_PAYMENT_NOTIFY_FAIL_${checkoutRequestID}`).set({
+                type: 'ANALYTICS_NOTIFICATION_ERROR',
+                subType: 'STK_PUSH_PAYMENT_RECEIVED',
+                error: `Failed to notify Analytics Server for payment received: ${deductionError.message}`,
+                transactionId: checkoutRequestID,
+                carrier: carrier,
+                amount: amountPaidByCustomer ? parseFloat(amountPaidByCustomer) : 0,
+                statusReported: 'PAYMENT_RECEIVED',
+                stack: deductionError.stack,
                 createdAt: now,
             });
+            // Mark for reconciliation as analytics update failed
+            needsReconciliation = true;
+            await transactionDocRef.update({
+                reconciliationNeeded: true,
+                errorMessage: `Analytics notification for payment receipt failed: ${deductionError.message}`
+            });
+            logger.warn(`⚠️ Transaction ${checkoutRequestID} marked for reconciliation due to analytics notification failure.`);
         }
+
     } else {
         // M-Pesa payment failed or was cancelled by user
         logger.info(`❌ Payment failed for ${checkoutRequestID}. ResultCode: ${resultCode}, Desc: ${callback.Body.stkCallback.ResultDesc}`);
-        finalTxStatus = 'MPESA_PAYMENT_FAILED'; // M-Pesa payment itself failed
-        finalSalesStatus = 'MPESA_PAYMENT_FAILED';
-        // No reconciliation needed in this case as customer didn't pay successfully
+        finalTransactionStatus = 'MPESA_PAYMENT_FAILED';
+
+        await transactionDocRef.set({
+            transactionID: checkoutRequestID,
+            type: 'STK_PUSH_PAYMENT',
+            transactionTime: transactionDateFromMpesa,
+            amountReceived: amountPaidByCustomer ? parseFloat(amountPaidByCustomer) : null,
+            mpesaReceiptNumber: mpesaReceiptNumber,
+            payerMsisdn: phoneNumberUsedForPayment,
+            billRefNumber: topupNumber,
+            carrier: carrier,
+            mpesaRawCallback: callback,
+            status: finalTransactionStatus, // Payment failed
+            fulfillmentStatus: 'NOT_APPLICABLE', // No fulfillment needed
+            mpesaResultCode: resultCode,
+            mpesaResultDesc: callback.Body.stkCallback.ResultDesc,
+            errorMessage: `M-Pesa payment failed: ${callback.Body.stkCallback.ResultDesc}`,
+            createdAt: initialRequestData.createdAt || now,
+            lastUpdated: now,
+            relatedSaleId: checkoutRequestID,
+            reconciliationNeeded: false, // No reconciliation needed as customer didn't pay
+        }, { merge: true });
+        logger.info(`✅ [transactions] Record for ${checkoutRequestID} updated to: ${finalTransactionStatus}`);
 
         await errorsCollection.doc(`STK_PAYMENT_FAILED_${checkoutRequestID}`).set({
             type: 'STK_PAYMENT_ERROR',
@@ -886,78 +459,44 @@ app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
         });
     }
 
-    // --- Final Updates to Firestore ---
-    // 1. Update 'transactions' collection (using the checkoutRequestID as doc ID)
-    await transactionsCollection.doc(checkoutRequestID).update({
-        status: finalTxStatus,
-        lastUpdated: now,
+    // Update the initial 'sales' request document to reflect the payment status
+    // It will be further updated by the fulfillment logic once airtime is sent.
+    await initialSalesRequestDocRef.update({
+        mpesaPaymentStatus: finalTransactionStatus, // Store M-Pesa payment outcome
         mpesaReceiptNumber: mpesaReceiptNumber,
-        transactionDateFromMpesa: transactionDateFromMpesa,
-        phoneNumberUsedForPayment: phoneNumberUsedForPayment,
-        reconciliationNeeded: needsReconciliation,
-        providerUsed: providerUsed, // Which provider actually fulfilled
-        secondaryProviderAttempted: secondaryProviderAttempted, // Was fallback attempted?
-    });
-    logger.info(`✅ [transactions] Final status for ${checkoutRequestID} updated to: ${finalTxStatus}`);
-
-    // 2. Update 'sales' collection
-    await salesCollection.doc(checkoutRequestID).update({
-        status: finalSalesStatus,
-        airtimeResult: airtimeResult,
-        completedAt: now,
+        mpesaTransactionDate: transactionDateFromMpesa,
+        mpesaPhoneNumberUsed: phoneNumberUsedForPayment,
+        mpesaAmountPaid: amountPaidByCustomer ? parseFloat(amountPaidByCustomer) : null,
+        fullStkCallback: callback, // Store full callback in the sales/request doc
         lastUpdated: now,
-        bonus: bonusAmount,
-        commission_rate: commissionRate,
-        total_sent: finalAmountToDispatch, // This is the amount actually attempted to be sent to the telco
-        mpesaReceiptNumber: mpesaReceiptNumber,
-        balanceAfterPayment: callback.Body.stkCallback.CallbackMetadata?.Item.find(item => item.Name === 'Balance')?.Value || null,
-        transactionDateFromMpesa: transactionDateFromMpesa,
-        phoneNumberUsedForPayment: phoneNumberUsedForPayment,
-        mpesaResultCode: resultCode,
-        mpesaResultDesc: callback.Body.stkCallback.ResultDesc,
-        amountPaidByCustomer: amountPaidByCustomer ? parseFloat(amountPaidByCustomer) : null,
-        errorDetails: (finalSalesStatus.includes('FAILED') && airtimeResult && airtimeResult.error) ? airtimeResult.error : null,
-        fullStkCallback: callback,
-        reconciliationNeeded: needsReconciliation, // Also add to sales for detailed reports
-        providerUsed: providerUsed, // Which provider actually fulfilled
-        secondaryProviderAttempted: secondaryProviderAttempted, // Was fallback attempted?
+        reconciliationNeededAtPayment: needsReconciliation, // Reflect if payment stage needs recon
+        // Importantly, fulfillment-related fields (bonus, total_sent, airtimeResult, providerUsed)
+        // should NOT be set here, as they will be set by the unified fulfillment logic.
     });
-    logger.info(`✅ [sales] Final status for ${checkoutRequestID} updated to: ${finalSalesStatus}`);
+    logger.info(`✅ [sales/initial_request] M-Pesa payment status for ${checkoutRequestID} updated.`);
 
-    // 3. Log to failed_reconciliationsCollection if reconciliation is needed
-    if (needsReconciliation) {
+    // If analytics notification failed and payment was successful, mark for reconciliation
+    if (needsReconciliation && resultCode === 0) {
         await failedReconciliationsCollection.doc(checkoutRequestID).set({
-            checkoutRequestID: checkoutRequestID,
+            transactionId: checkoutRequestID,
             mpesaReceiptNumber: mpesaReceiptNumber,
-            originalAmountPaid: originalAmount, // The amount customer paid
+            originalAmountPaid: amountPaidByCustomer ? parseFloat(amountPaidByCustomer) : 0,
             topupNumber: topupNumber,
             carrier: carrier,
-            failureReason: finalSalesStatus, // Specific reason for airtime failure
-            errorDetails: airtimeResult ? airtimeResult.error : 'Unknown airtime dispatch error',
-            mpesaCallbackDetails: callback, // Full M-Pesa callback for context
-            airtimeAttemptResult: airtimeResult, // Result from the airtime API call
-            amountDispatched: finalAmountToDispatch, // Log the amount that was attempted to be dispatched
-            providerUsed: providerUsed, // Could be null if both failed, or the one attempted
-            secondaryProviderAttempted: secondaryProviderAttempted,
+            failureReason: 'ANALYTICS_NOTIFICATION_FAILED_AT_PAYMENT',
+            errorDetails: 'Analytics server could not be notified for float deduction after successful payment.',
+            mpesaCallbackDetails: callback,
             timestamp: now,
-            status: 'PENDING_REFUND_OR_MANUAL_TOPUP', // Status within reconciliation collection
-            processedByAnalytics: false, // Flag for analytics server to pick up
-        });
-        logger.info(`⚠️ Transaction ${checkoutRequestID} marked for reconciliation in failed_reconciliations.`);
+            status: 'PENDING_ANALYTICS_RECONCILIATION',
+        }, { merge: true });
+        logger.warn(`⚠️ Added ${checkoutRequestID} to 'failed_reconciliations' due to analytics notification failure.`);
     }
 
-    res.json({ resultCode: 0, resultDesc: 'Callback received and processed by DaimaPay server.' });
+    res.json({ ResultCode: 0, ResultDesc: 'Callback received and payment status recorded by DaimaPay server.' });
 });
 
-// --- Health Check / Root Endpoint ---
-app.get('/', (req, res) => {
-    res.status(200).send('DaimaPay STK Push and Airtime Dispatch Service is running!');
-});
-
-// --- Server Start ---
+// --- Start the Server ---
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    logger.info(`DaimaPay STK Push Server running on port ${PORT}`);
-    logger.info(`Callback URL: ${CALLBACK_URL}`);
-    logger.info(`Analytics Server URL: ${ANALYTICS_SERVER_URL}`);
-    logger.info(`NODE_ENV is: ${process.env.NODE_ENV || 'development'}`);
+    logger.info(`🚀 Server running on port ${PORT}`);
 });
