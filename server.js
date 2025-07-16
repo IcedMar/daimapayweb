@@ -30,23 +30,22 @@ const bonusHistoryCollection = db.collection('bonus_history');
 const airtimeBonusesDocRef = db.collection('airtime_bonuses').doc('current_settings');
 const safaricomDealerConfigRef = db.collection('mpesa_settings').doc('main_config');
 
-const app = express();
+app.use(express.json());;
 app.use(bodyParser.json());
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type'],
+};
 
-app.use(cors({
-    origin: function (origin, callback) {
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) === -1) {
-            const msg = `The CORS policy for this site does not allow  from the specified Origin: ${origin}`;
-            logger.error(msg); // Use your logger here
-            return callback(new Error(msg), false);
-        }
-        return callback(null, true);
-    },
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', 
-    credentials: true, 
-    optionsSuccessStatus: 204
-}));
+app.use(cors(corsOptions));
 
 // --- Simple Logger Utility ---
 const logger = {
