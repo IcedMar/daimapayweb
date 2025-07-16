@@ -96,18 +96,24 @@ const DEALER_PIN_CACHE_TTL = 10 * 60 * 1000;
 
 // --- Helper Functions ---
 async function getAccessToken() {
-    const auth = Buffer.from(`${CONSUMER_KEY}:${CONSUMER_SECRET}`).toString('base64');
-    try {
-        const response = await axios.get(SAFARICOM_MPESA_AUTH_URL, {
-            headers: {
-                'Authorization': `Basic ${auth}`
-            }
-        });
-        return response.data.access_token;
-    } catch (error) {
-        logger.error('Error getting M-Pesa access token (STK Push):', error.message);
-        throw new Error('Failed to get M-Pesa access token.');
-    }
+  try {
+    const consumerKey = process.env.CONSUMER_KEY;
+    const consumerSecret = process.env.CONSUMER_SECRET;
+    const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
+    const response = await axios.get(
+      'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
+      {
+        headers: {
+          Authorization: `Basic ${auth}`,
+        },
+      }
+    );
+    logger.info('Token generation successful:', response.data);
+    return response.data.access_token;
+  } catch (err) {
+    logger.error('Token generation failed:', err.response?.data || err.message);
+    throw err;
+  }
 }
 
 // NEW: Service PIN generation
