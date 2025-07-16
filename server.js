@@ -5,11 +5,31 @@ const axios = require('axios');
 const rateLimit = require('express-rate-limit');
 const admin = require('firebase-admin');
 const AfricasTalking = require('africastalking'); 
+const cors = require('cors');
 
 const serviceAccount = JSON.parse(
   Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_JSON, 'base64').toString('utf-8')
 );
 
+const allowedOrigins =[
+  'https://daima-pay-portal.onrender.com',
+  'https://dpanalyticsserver.onrender.com'
+];
+
+app.use(cors({
+    origin: function (origin, callback) {
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) === -1) {
+            const msg = `The CORS policy for this site does not allow access from the specified Origin: ${origin}`;
+            logger.error(msg); // Use your logger here
+            return callback(new Error(msg), false);
+        }
+        return callback(null, true);
+    },
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', 
+    credentials: true, 
+    optionsSuccessStatus: 204
+}));
 
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
