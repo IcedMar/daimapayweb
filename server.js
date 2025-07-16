@@ -37,7 +37,7 @@ app.use(cors({
     origin: function (origin, callback) {
         if (!origin) return callback(null, true);
         if (allowedOrigins.indexOf(origin) === -1) {
-            const msg = `The CORS policy for this site does not allow access from the specified Origin: ${origin}`;
+            const msg = `The CORS policy for this site does not allow  from the specified Origin: ${origin}`;
             logger.error(msg); // Use your logger here
             return callback(new Error(msg), false);
         }
@@ -62,7 +62,7 @@ const BUSINESS_SHORT_CODE = process.env.BUSINESS_SHORT_CODE;
 const PASSKEY = process.env.PASSKEY;
 const CONSUMER_KEY = process.env.CONSUMER_KEY; // For M-Pesa STK Push Auth
 const CONSUMER_SECRET = process.env.CONSUMER_SECRET; // For M-Pesa STK Push Auth
-const CALLBACK_URL = process.env.CALLBACK_URL; // Your publicly accessible URL for M-Pesa callbacks
+const CALLBACK_URL = process.env.CALLBACK_URL; // Your publicly ible URL for M-Pesa callbacks
 const ANALYTICS_SERVER_URL = process.env.ANALYTICS_SERVER_URL; 
 
 // NEW: Environment variables for Safaricom Dealer API and Africa's Talking
