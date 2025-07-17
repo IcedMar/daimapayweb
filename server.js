@@ -38,7 +38,6 @@ if (!admin.apps.length) {
 const firestore = admin.firestore();
 
 // Firestore Collection References
-const transactionsCollection = firestore.collection('transactions');
 const salesCollection = firestore.collection('sales'); // This will store initial requests AND fulfillment details
 const errorsCollection = firestore.collection('errors');
 const safaricomFloatDocRef = firestore.collection('Saf_float').doc('current');
@@ -48,7 +47,7 @@ const reconciledTransactionsCollection = firestore.collection('reconciled_transa
 const bonusHistoryCollection = firestore.collection('bonus_history');
 const reversalTimeoutsCollection = firestore.collection('reversal_timeouts');
 const safaricomDealerConfigRef = firestore.collection('mpesa_settings').doc('main_config');
-const stkTransactionsCollection = firestore.collection('stk_transactions');
+const stkTransactionsCollection = firestore.collection('stk_Transactions');
 
 // M-Pesa API Credentials from .env
 const CONSUMER_KEY = process.env.CONSUMER_KEY;
