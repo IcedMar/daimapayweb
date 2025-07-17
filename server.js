@@ -1101,7 +1101,7 @@ const stkCallbackRateLimiter = rateLimit({
 // --- ENDPOINTS ---
 
 // 1. STK Push Initiation Endpoint
-app.post('/stk-push', stkPushRateLimiter, async (req, res) => {
+app.post('/stk-push', stkPushLimiter, async (req, res) => {
     const { amount, phoneNumber, recipient } = req.body;
     const now = new Date();
     const uniqueRequestIdentifier = `STK-${Date.now()}-${nanoid(10)}`; // Use this for internal tracking if needed, not as sales ID
