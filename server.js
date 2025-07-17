@@ -1102,13 +1102,19 @@ const stkCallbackRateLimiter = rateLimit({
 
 // 1. STK Push Initiation Endpoint
 app.post('/stk-push', stkPushLimiter, async (req, res) => {
-    const { amount, phoneNumber, recipient } = req.body;
-    const now = new Date();
-    const uniqueRequestIdentifier = `STK-${Date.now()}-${nanoid(10)}`; // Use this for internal tracking if needed, not as sales ID
+    const { amount, phoneNumber, recipient } = req.body; // recipient is the number to top up
+
+    if (!amount || !phoneNumber || !recipient) {
+        logger.warn('Missing required parameters for STK Push:', { amount, phoneNumber, recipient });
+        return res.status(400).json({ success: false, message: 'Missing required parameters: amount, phoneNumber, recipient.' });
+    }
+
+    const timestamp = generateTimestamp();
+    const password = generatePassword(SHORTCODE, PASSKEY, timestamp);
 
     logger.info(`Initiating STK Push for recipient: ${recipient}, amount: ${amount}, customer: ${phoneNumber}`);
 
-    // --- Input Validation ---
+    // --- Input Validation (moved here for early exit) ---
     const MIN_AMOUNT = 5;
     const MAX_AMOUNT = 5000;
     const amountFloat = parseFloat(amount);
@@ -1122,82 +1128,83 @@ app.post('/stk-push', stkPushLimiter, async (req, res) => {
     const cleanedCustomerPhone = phoneNumber.replace(/\D/g, ''); // Ensure only digits
 
     if (!cleanedRecipient || !cleanedCustomerPhone || cleanedRecipient.length < 9 || cleanedCustomerPhone.length < 9) {
-        logger.warn(`🛑 Invalid recipient (${recipient}) or customer phone (${customerPhone}) for STK Push.`);
-        return res.status(400).json({ success: false, message: "Invalid recipient or customer phone number." });
+        logger.warn(`🛑 Invalid recipient (${recipient}) or customer phone (${phoneNumber}) for STK Push.`);
+        return res.status(400).json({ success: false, message: "Invalid recipient or customer phone number format." });
     }
 
-    const carrier = detectCarrier(cleanedRecipient);
-    if (carrier === 'Unknown') {
+    const detectedCarrier = detectCarrier(cleanedRecipient); // Detect carrier at initiation
+    if (detectedCarrier === 'Unknown') {
         logger.warn(`🛑 Unknown carrier for recipient ${cleanedRecipient}.`);
         return res.status(400).json({ success: false, message: "Recipient's carrier is not supported." });
     }
 
     try {
         const accessToken = await getAccessToken();
-        const timestamp = generateTimestamp();
-        const password = generatePassword(SHORTCODE, PASSKEY, timestamp);
 
         const stkPushPayload = {
-            BusinessShortCode: BUSINESS_SHORT_CODE,
+            BusinessShortCode: SHORTCODE,
             Password: password,
             Timestamp: timestamp,
             TransactionType: 'CustomerPayBillOnline', // Or 'CustomerBuyGoodsOnline' if applicable
-            Amount: amountFloat,
-            PartyA: cleanedCustomerPhone, // Payer's phone number
-            PartyB: BUSINESS_SHORT_CODE, // Your Paybill/Till number
-            PhoneNumber: cleanedCustomerPhone, // Phone to send STK Push to
-            CallBackURL: process.env.CALLBACK_URL, // Your STK callback URL
-            AccountReference: cleanedRecipient, // Used as BillRefNumber / Recipient
-            TransactionDesc: 'Airtime Topup'
+            Amount: amountFloat, // Use the parsed float amount
+            PartyA: cleanedCustomerPhone, // Customer's phone number
+            PartyB: SHORTCODE, // Your Paybill/Till number
+            PhoneNumber: cleanedCustomerPhone, // Customer's phone number
+            CallBackURL: STK_CALLBACK_URL,
+            AccountReference: cleanedRecipient, // Use recipient number as account reference
+            TransactionDesc: `Airtime for ${cleanedRecipient}`
         };
 
-        const response = await axios.post(
-            process.env.MPESA_STK_PUSH_URL,
-            stkPushPayload, {
+        const stkPushResponse = await axios.post(
+            'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+            stkPushPayload,
+            {
                 headers: {
-                    Authorization: `Bearer ${accessToken}`,
-                    'Content-Type': 'application/json'
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json' // Explicitly set Content-Type
                 }
             }
         );
 
-        logger.info('STK Push Request Sent:', response.data);
+        logger.info('STK Push Request Sent to Daraja:', stkPushResponse.data);
 
         const {
             ResponseCode,
             ResponseDescription,
             CustomerMessage,
-            CheckoutRequestID, 
+            CheckoutRequestID, // This is the ID M-Pesa provides
             MerchantRequestID
-        } = response.data;
+        } = stkPushResponse.data;
 
+        // ONLY create the sales and transaction documents if M-Pesa successfully accepted the push request
         if (ResponseCode === '0') {
-            const saleDocRef = salesCollection.doc(CheckoutRequestID); // Use CheckoutRequestID as the doc ID
-            await saleDocRef.set({
-                saleId: CheckoutRequestID, // Store it explicitly as well
-                recipient: cleanedRecipient,
-                amount: amountFloat,
+            await salesCollection.doc(CheckoutRequestID).set({
+                saleId: CheckoutRequestID, // Store M-Pesa's CheckoutRequestID as saleId
                 initiatorPhoneNumber: cleanedCustomerPhone,
-                carrier: carrier,
+                recipient: cleanedRecipient,
+                amount: amountFloat, // Original amount requested by customer
+                carrier: detectedCarrier,
                 mpesaResponseCode: ResponseCode,
                 mpesaResponseDescription: ResponseDescription,
                 mpesaCustomerMessage: CustomerMessage,
                 merchantRequestID: MerchantRequestID,
-                checkoutRequestID: CheckoutRequestID,
-                status: 'PENDING_MPESA_PAYMENT', // Waiting for customer to complete payment
+                checkoutRequestID: CheckoutRequestID, // Store it explicitly
+                status: 'PENDING_MPESA_PAYMENT', // Waiting for M-Pesa payment confirmation
                 createdAt: FieldValue.serverTimestamp(),
                 lastUpdated: FieldValue.serverTimestamp(),
+                type: 'STK_PUSH_REQUEST',
             });
-            logger.info(`✅ Sales document ${CheckoutRequestID} created with STK Push response.`);
+            logger.info(`✅ Sales document ${CheckoutRequestID} created with STK Push initiation response.`);
 
+            // Create initial transactions document (linked to the same CheckoutRequestID)
             await transactionsCollection.doc(CheckoutRequestID).set({
-                transactionID: CheckoutRequestID, // Use CheckoutRequestID as transaction ID for STK
-                type: 'STK_PUSH_INITIATED',
+                transactionID: CheckoutRequestID, // Use M-Pesa's CheckoutRequestID as the main transaction ID
+                type: 'STK_PUSH_PAYMENT', // Initial type
                 initiatorPhoneNumber: cleanedCustomerPhone,
                 recipientNumber: cleanedRecipient,
                 amountRequested: amountFloat,
-                mpesaInitiationResponse: response.data,
-                status: 'INITIATED_STK_PUSH', // Initial status
+                mpesaInitiationResponse: stkPushResponse.data,
+                status: 'INITIATED_STK_PUSH', // Status after successful initiation with M-Pesa
                 createdAt: FieldValue.serverTimestamp(),
                 lastUpdated: FieldValue.serverTimestamp(),
                 relatedSaleId: CheckoutRequestID, // Link to the sales document
@@ -1205,38 +1212,47 @@ app.post('/stk-push', stkPushLimiter, async (req, res) => {
             logger.info(`✅ Transaction document ${CheckoutRequestID} created for STK Push initiation.`);
 
 
-            return res.json({ success: true, message: CustomerMessage, checkoutRequestID: CheckoutRequestID });
+            return res.status(200).json({ success: true, message: CustomerMessage, checkoutRequestID: CheckoutRequestID });
+
         } else {
-            // M-Pesa did not accept the push request (e.g., invalid number)
-            logger.error('❌ STK Push Request Failed:', response.data);
+            // M-Pesa did not accept the push request (e.g., invalid number, insufficient balance in your shortcode)
+            logger.error('❌ STK Push Request Failed by Daraja:', stkPushResponse.data);
 
             // Log this failure in errors collection
             await errorsCollection.add({
-                type: 'STK_PUSH_INITIATION_FAILED',
+                type: 'STK_PUSH_INITIATION_FAILED_BY_DARJA',
                 error: ResponseDescription,
                 requestPayload: stkPushPayload,
-                mpesaResponse: response.data,
+                mpesaResponse: stkPushResponse.data,
                 createdAt: FieldValue.serverTimestamp(),
             });
+
+            // No sales/transaction documents created as M-Pesa rejected the request
             return res.status(500).json({ success: false, message: ResponseDescription || 'STK Push request failed.' });
         }
 
     } catch (error) {
-        logger.error('❌ Error during STK Push:', { message: error.message, stack: error.stack });
-
-        // Log critical errors during API call to M-Pesa
-        await errorsCollection.add({
-            type: 'STK_PUSH_CRITICAL_ERROR',
-            error: error.message,
+        logger.error('❌ Critical error during STK Push initiation:', {
+            message: error.message,
             stack: error.stack,
             requestBody: req.body,
+            responseError: error.response ? error.response.data : 'No response data' // Log M-Pesa's error response if available
+        });
+
+        const errorMessage = error.response ? (error.response.data.errorMessage || error.response.data.MpesaError || error.response.data) : error.message;
+
+        // Log the error
+        await errorsCollection.add({
+            type: 'STK_PUSH_CRITICAL_INITIATION_ERROR',
+            error: errorMessage,
+            requestBody: req.body,
+            stack: error.stack,
             createdAt: FieldValue.serverTimestamp(),
         });
 
-        return res.status(500).json({ success: false, message: 'Internal server error during STK Push processing.' });
+        res.status(500).json({ success: false, message: 'Failed to initiate STK Push.', error: errorMessage });
     }
 });
-
 
 // 2. M-Pesa STK Callback Endpoint (where M-Pesa sends payment confirmation)
 app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
