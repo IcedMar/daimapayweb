@@ -465,6 +465,44 @@ async function sendAfricasTalkingAirtime(phoneNumber, amount, carrier) {
     }
 }
 
+// Helper function to notify the offline server (add this somewhere in your server.js)
+async function notifyOfflineServerForFulfillment(transactionDetails) {
+    try {
+        const offlineServerUrl = process.env.OFFLINE_SERVER_FULFILLMENT_URL;
+        if (!offlineServerUrl) {
+            logger.error('OFFLINE_SERVER_FULFILLMENT_URL is not set in environment variables. Cannot notify offline server.');
+            return { success: false, message: 'Offline server URL not configured.' };
+        }
+
+        // Send a POST request to your offline server
+        const response = await axios.post(offlineServerUrl, transactionDetails);
+
+        logger.info(`✅ Notified offline server for fulfillment of ${transactionDetails.checkoutRequestID}. Offline server response:`, response.data);
+        return { success: true, responseData: response.data };
+
+    } catch (error) {
+        logger.error(`❌ Failed to notify offline server for fulfillment of ${transactionDetails.checkoutRequestID}:`, {
+            message: error.message,
+            statusCode: error.response ? error.response.status : 'N/A',
+            responseData: error.response ? error.response.data : 'N/A',
+            stack: error.stack
+        });
+
+        // Log this critical error to Firestore's errorsCollection
+        await errorsCollection.add({
+            type: 'OFFLINE_SERVER_NOTIFICATION_FAILED',
+            checkoutRequestID: transactionDetails.checkoutRequestID,
+            error: error.message,
+            offlineServerResponse: error.response ? error.response.data : null,
+            payloadSent: transactionDetails,
+            createdAt: FieldValue.serverTimestamp(),
+        });
+
+        return { success: false, message: 'Failed to notify offline server.' };
+    }
+}
+
+
 function generateSecurityCredential(password) {
     const certificatePath = '/etc/secrets/ProductionCertificate.cer';
 
@@ -533,10 +571,6 @@ async function initiateDarajaReversal(transactionId, amount, receiverMsisdn) {
 
         logger.info(`✅ Daraja Reversal API response for TransID ${transactionId}:`, response.data);
 
-        // Daraja reversal API typically returns a `ResponseCode` and `ResponseDescription`
-        // A ResponseCode of '0' usually indicates that the request was accepted for processing.
-        // The actual success/failure of the reversal happens asynchronously via the ResultURL.
-        // For now, we'll consider '0' as "reversal initiated successfully".
         if (response.data && response.data.ResponseCode === '0') {
             return {
                 success: true,
@@ -1256,7 +1290,7 @@ app.post('/stk-push', stkPushLimiter, async (req, res) => {
 });
 
 // 2. M-Pesa STK Callback Endpoint (where M-Pesa sends payment confirmation)
-app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
+/*app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
     const callback = req.body;
     const now = FieldValue.serverTimestamp();
 
@@ -1404,7 +1438,155 @@ app.post('/stk-callback', stkCallbackRateLimiter, async (req, res) => {
 
     res.json({ ResultCode: 0, ResultDesc: 'Callback received and payment status recorded by DaimaPay server.' });
 });
+*/
+// Modified STK Callback Endpoint
+app.post('/stk-callback', async (req, res) => {
+    const callback = req.body;
+    logger.info('📞 Received STK Callback:', JSON.stringify(callback, null, 2)); // Log full callback for debugging
 
+    // Safaricom sends an empty object on initial push confirmation before payment
+    if (!callback || !callback.Body || !callback.Body.stkCallback) {
+        logger.warn('Received an empty or malformed STK callback. Ignoring.');
+        return res.json({ ResultCode: 0, ResultDesc: 'Callback processed (ignored empty/malformed).' });
+    }
+
+    const { MerchantRequestID, CheckoutRequestID, ResultCode, ResultDesc, CallbackMetadata } = callback.Body.stkCallback;
+
+    // Extracting relevant data for logging and processing
+    const amount = CallbackMetadata?.Item.find(item => item.Name === 'Amount')?.Value;
+    const mpesaReceiptNumber = CallbackMetadata?.Item.find(item => item.Name === 'MpesaReceiptNumber')?.Value;
+    const transactionDate = CallbackMetadata?.Item.find(item => item.Name === 'TransactionDate')?.Value;
+    const phoneNumber = CallbackMetadata?.Item.find(item => item.Name === 'PhoneNumber')?.Value;
+
+    // Retrieve the initial sales request document
+    const initialSalesRequestDocRef = salesCollection.doc(CheckoutRequestID);
+    const initialSalesRequestDoc = await initialSalesRequestDocRef.get();
+
+    if (!initialSalesRequestDoc.exists) {
+        logger.error('❌ No matching initial sales request for CheckoutRequestID in Firestore:', CheckoutRequestID);
+        // Respond with success to M-Pesa to prevent retries of this unknown callback
+        return res.json({ ResultCode: 0, ResultDesc: 'No matching transaction found.' });
+    }
+
+    const initialSaleData = initialSalesRequestDoc.data();
+
+    // Check M-Pesa ResultCode for success
+    if (ResultCode === 0) {
+        logger.info(`✅ M-Pesa payment successful for ${CheckoutRequestID}. Marking for external fulfillment.`);
+
+        const updatedSalesData = {
+            mpesaPaymentStatus: 'SUCCESSFUL_PENDING_EXTERNAL_FULFILLMENT', // New status
+            mpesaResultCode: ResultCode,
+            mpesaResultDesc: ResultDesc,
+            mpesaReceiptNumber: mpesaReceiptNumber,
+            mpesaTransactionDate: transactionDate,
+            customerPhoneNumber: phoneNumber,
+            amountPaid: amount,
+            mpesaCallbackMetadata: CallbackMetadata, // Store full metadata
+            lastUpdated: FieldValue.serverTimestamp(),
+        };
+
+        const updatedTransactionData = {
+            status: 'RECEIVED_PENDING_OFFLINE_FULFILLMENT', // New status for transactions collection
+            mpesaPaymentStatus: 'SUCCESSFUL',
+            mpesaCallbackData: callback.Body.stkCallback,
+            amountConfirmed: amount,
+            mpesaReceiptNumber: mpesaReceiptNumber,
+            mpesaTransactionDate: transactionDate,
+            lastUpdated: FieldValue.serverTimestamp(),
+        };
+
+        try {
+            await initialSalesRequestDocRef.update(updatedSalesData);
+            logger.info(`✅ Sales document ${CheckoutRequestID} updated with SUCCESSFUL_PENDING_EXTERNAL_FULFILLMENT status.`);
+
+            const transactionDocRef = transactionsCollection.doc(CheckoutRequestID);
+            await transactionDocRef.update(updatedTransactionData);
+            logger.info(`✅ Transaction document ${CheckoutRequestID} updated with status: RECEIVED_PENDING_OFFLINE_FULFILLMENT.`);
+
+            // --- NOTIFY OFFLINE SERVER FOR FULFILLMENT ---
+            const fulfillmentDetails = {
+                checkoutRequestID: CheckoutRequestID,
+                merchantRequestID: MerchantRequestID,
+                mpesaReceiptNumber: mpesaReceiptNumber,
+                amountPaid: amount,
+                recipientNumber: initialSaleData.recipient, 
+                customerPhoneNumber: phoneNumber, 
+                carrier: initialSaleData.carrier, 
+            };
+            const notificationResult = await notifyOfflineServerForFulfillment(fulfillmentDetails);
+
+            if (notificationResult.success) {
+                logger.info(`✅ Offline server successfully notified for fulfillment of ${CheckoutRequestID}.`);
+                await initialSalesRequestDocRef.update({
+                    offlineNotificationStatus: 'SUCCESS',
+                    lastUpdated: FieldValue.serverTimestamp(),
+                });
+            } else {
+                logger.error(`❌ Failed to notify offline server for ${CheckoutRequestID}. Reversal might be needed manually if fulfillment not picked up.`);
+                await initialSalesRequestDocRef.update({
+                    offlineNotificationStatus: 'FAILED',
+                    offlineNotificationError: notificationResult.message,
+                    lastUpdated: FieldValue.serverTimestamp(),
+                });
+            }
+
+            // Respond to M-Pesa that the callback was processed
+            return res.json({ ResultCode: 0, ResultDesc: 'Callback received and processing for external fulfillment initiated.' });
+
+        } catch (updateError) {
+            logger.error(`❌ Error updating Firestore or notifying offline server for ${CheckoutRequestID}:`, { message: updateError.message, stack: updateError.stack });
+            await errorsCollection.add({
+                type: 'STK_CALLBACK_FIRESTORE_UPDATE_OR_NOTIFICATION_ERROR',
+                checkoutRequestID: CheckoutRequestID,
+                error: updateError.message,
+                stack: updateError.stack,
+                callbackData: callback,
+                createdAt: FieldValue.serverTimestamp(),
+            });
+            // Still respond success to M-Pesa to prevent retries (you'll handle the error internally)
+            return res.json({ ResultCode: 0, ResultDesc: 'Callback processed with internal error during update/notification.' });
+        }
+
+    } else {
+        // M-Pesa payment failed or was cancelled by user
+        logger.warn(`⚠️ M-Pesa payment failed or cancelled for ${CheckoutRequestID}. ResultCode: ${ResultCode}, ResultDesc: ${ResultDesc}`);
+
+        const updatedSalesData = {
+            mpesaPaymentStatus: 'FAILED_OR_CANCELLED',
+            mpesaResultCode: ResultCode,
+            mpesaResultDesc: ResultDesc,
+            customerPhoneNumber: phoneNumber,
+            mpesaCallbackMetadata: CallbackMetadata,
+            lastUpdated: FieldValue.serverTimestamp(),
+        };
+
+        const updatedTransactionData = {
+            status: 'PAYMENT_FAILED_OR_CANCELLED',
+            mpesaPaymentStatus: 'FAILED',
+            mpesaCallbackData: callback.Body.stkCallback,
+            lastUpdated: FieldValue.serverTimestamp(),
+        };
+
+        try {
+            await initialSalesRequestDocRef.update(updatedSalesData);
+            await transactionsCollection.doc(CheckoutRequestID).update(updatedTransactionData);
+            logger.info(`✅ Sales and transaction documents updated for failed/cancelled payment for ${CheckoutRequestID}.`);
+        } catch (error) {
+            logger.error(`❌ Error updating documents for failed/cancelled STK payment ${CheckoutRequestID}:`, { message: error.message, stack: error.stack });
+            await errorsCollection.add({
+                type: 'STK_CALLBACK_FAILED_PAYMENT_UPDATE_ERROR',
+                checkoutRequestID: CheckoutRequestID,
+                error: error.message,
+                stack: error.stack,
+                callbackData: callback,
+                createdAt: FieldValue.serverTimestamp(),
+            });
+        }
+        // Always respond with success to M-Pesa even for failed payments, to acknowledge receipt of the callback.
+        return res.json({ ResultCode: 0, ResultDesc: 'Payment failed/cancelled. Callback processed.' });
+    }
+});
 // Daraja Reversal Result Endpoint
 app.post('/daraja-reversal-result', async (req, res) => {
     try {
