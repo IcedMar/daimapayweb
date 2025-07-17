@@ -331,12 +331,13 @@ async function sendSafaricomAirtime(receiverNumber, amount) {
             if (idMatch && idMatch[1]) {
                 safaricomInternalTransId = idMatch[1];
             }
-            const balanceMatch = desc.match(/New balance is Ksh\. (\d+\.\d{2})/); // Regex for the balance
+            const balanceMatch = desc.match(/New balance is Ksh\. (\d+(?:\.\d{2})?)/); // Regex for the balance
             if (balanceMatch && balanceMatch[1]) {
                 newSafaricomFloatBalance = parseFloat(balanceMatch[1]);
+            }else {
+                logger.warn(`⚠️ Could not extract new Safaricom float balance from response description: "${desc}"`);
             }
         }
-
         // Always log the full response from Safaricom for debugging purposes
         logger.info('✅ Safaricom dealer airtime API response:', { receiver: normalizedReceiver, amount: amount, response_data: response.data });
 
