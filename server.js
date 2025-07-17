@@ -1545,8 +1545,6 @@ app.post('/api/airtime-bonuses/update', async (req, res) => {
     }
 });
 
-
-
 app.get("/ping", (req, res) => {
   res.status(200).send("pong");
 });
