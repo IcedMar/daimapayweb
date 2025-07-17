@@ -1139,7 +1139,7 @@ const stkCallbackRateLimiter = rateLimit({
 
 // 1. STK Push Initiation Endpoint
 app.post('/stk-push', stkPushLimiter, async (req, res) => {
-    const { amount, phoneNumber, recipient } = req.body; // recipient is the number to top up
+    const { amount, phoneNumber, recipient, customerName, serviceType, reference } = req.body; // Added customerName, serviceType, reference for completeness
 
     if (!amount || !phoneNumber || !recipient) {
         logger.warn('Missing required parameters for STK Push:', { amount, phoneNumber, recipient });
@@ -1175,6 +1175,9 @@ app.post('/stk-push', stkPushLimiter, async (req, res) => {
         return res.status(400).json({ success: false, message: "Recipient's carrier is not supported." });
     }
 
+    // Declare CheckoutRequestID here, it will be set after Daraja response
+    let CheckoutRequestID = null;
+
     try {
         const accessToken = await getAccessToken();
 
@@ -1209,29 +1212,33 @@ app.post('/stk-push', stkPushLimiter, async (req, res) => {
             ResponseCode,
             ResponseDescription,
             CustomerMessage,
-            CheckoutRequestID, // This is the ID M-Pesa provides
+            CheckoutRequestID: darajaCheckoutRequestID, // Rename to avoid conflict with outer scope
             MerchantRequestID
         } = stkPushResponse.data;
 
-        // ONLY create the sales and transaction documents if M-Pesa successfully accepted the push request
+        // Assign Daraja's CheckoutRequestID to the outer scope variable
+        CheckoutRequestID = darajaCheckoutRequestID;
+
+        // ONLY create the stk_transaction document if M-Pesa successfully accepted the push request
         if (ResponseCode === '0') {
             await stkTransactionsCollection.doc(CheckoutRequestID).set({
                 checkoutRequestID: CheckoutRequestID,
-                merchantRequestID: null, // Will be updated by callback
-                phoneNumber: normalizedPhoneNumber, // The number that received the STK Push
-                amount: amount,
-                recipient: recipient, // Crucial: Store the intended recipient here
-                carrier: carrier, // Assuming you detect carrier during initial request
+                merchantRequestID: MerchantRequestID, // Populate directly here
+                phoneNumber: cleanedCustomerPhone, // The number that received the STK Push
+                amount: amountFloat, // Use amountFloat for consistency
+                recipient: cleanedRecipient, // Crucial: Store the intended recipient here
+                carrier: detectedCarrier, // Assuming you detect carrier during initial request
                 initialRequestAt: FieldValue.serverTimestamp(),
                 stkPushStatus: 'PUSH_INITIATED', // Initial status
                 stkPushPayload: stkPushPayload, // Store the payload sent to Daraja
+                darajaResponse: stkPushResponse.data, // Store full Daraja response here
                 customerName: customerName || null,
                 serviceType: serviceType || 'airtime',
                 reference: reference || null,
-            // You can add other fields here that are specific to your STK request
-        });
+                lastUpdated: FieldValue.serverTimestamp(), // Add lastUpdated here too
+            });
             logger.info(`✅ STK Transaction document ${CheckoutRequestID} created with STK Push initiation response.`);
-            
+
             return res.status(200).json({ success: true, message: CustomerMessage, checkoutRequestID: CheckoutRequestID });
 
         } else {
@@ -1245,9 +1252,10 @@ app.post('/stk-push', stkPushLimiter, async (req, res) => {
                 requestPayload: stkPushPayload,
                 mpesaResponse: stkPushResponse.data,
                 createdAt: FieldValue.serverTimestamp(),
+                checkoutRequestID: CheckoutRequestID, // Log this ID even if no record was created for it
             });
 
-            // No sales/transaction documents created as M-Pesa rejected the request
+            // No stk_transaction document created if Daraja rejected the request
             return res.status(500).json({ success: false, message: ResponseDescription || 'STK Push request failed.' });
         }
 
@@ -1256,18 +1264,18 @@ app.post('/stk-push', stkPushLimiter, async (req, res) => {
             message: error.message,
             stack: error.stack,
             requestBody: req.body,
-            responseError: error.response ? error.response.data : 'No response data' // Log M-Pesa's error response if available
+            responseError: error.response ? error.response.data : 'No response data'
         });
 
         const errorMessage = error.response ? (error.response.data.errorMessage || error.response.data.MpesaError || error.response.data) : error.message;
 
-        // Log the error
         await errorsCollection.add({
             type: 'STK_PUSH_CRITICAL_INITIATION_ERROR',
             error: errorMessage,
             requestBody: req.body,
             stack: error.stack,
             createdAt: FieldValue.serverTimestamp(),
+            checkoutRequestID: CheckoutRequestID || 'N/A', // Log the ID if available
         });
 
         res.status(500).json({ success: false, message: 'Failed to initiate STK Push.', error: errorMessage });
@@ -1432,97 +1440,108 @@ app.post('/stk-callback', async (req, res) => {
     // Safaricom sends an empty object on initial push confirmation before payment
     if (!callback || !callback.Body || !callback.Body.stkCallback) {
         logger.warn('Received an empty or malformed STK callback. Ignoring.');
+        // Always respond with ResultCode 0 to M-Pesa to acknowledge receipt and prevent retries.
         return res.json({ ResultCode: 0, ResultDesc: 'Callback processed (ignored empty/malformed).' });
     }
 
     const { MerchantRequestID, CheckoutRequestID, ResultCode, ResultDesc, CallbackMetadata } = callback.Body.stkCallback;
 
-    // Extracting relevant data for logging and processing
+    // Extracting relevant data from the callback
     const amount = CallbackMetadata?.Item.find(item => item.Name === 'Amount')?.Value;
     const mpesaReceiptNumber = CallbackMetadata?.Item.find(item => item.Name === 'MpesaReceiptNumber')?.Value;
     const transactionDate = CallbackMetadata?.Item.find(item => item.Name === 'TransactionDate')?.Value;
-    const phoneNumber = CallbackMetadata?.Item.find(item => item.Name === 'PhoneNumber')?.Value;
+    const customerPhoneNumber = CallbackMetadata?.Item.find(item => item.Name === 'PhoneNumber')?.Value; // PartyA's phone
 
-    // Retrieve the initial sales request document
-    const initialSalesRequestDocRef = salesCollection.doc(CheckoutRequestID);
-    const initialSalesRequestDoc = await initialSalesRequestDocRef.get();
+    // --- Retrieve the STK transaction record ---
+    // This is the *only* collection the STK server should read/update now.
+    const stkTransactionDocRef = stkTransactionsCollection.doc(CheckoutRequestID);
+    const stkTransactionDoc = await stkTransactionDocRef.get();
 
-    if (!initialSalesRequestDoc.exists) {
-        logger.error('❌ No matching initial sales request for CheckoutRequestID in Firestore:', CheckoutRequestID);
-        // Respond with success to M-Pesa to prevent retries of this unknown callback
-        return res.json({ ResultCode: 0, ResultDesc: 'No matching transaction found.' });
+    if (!stkTransactionDoc.exists) {
+        logger.error(`❌ No matching STK transaction record for CheckoutRequestID (${CheckoutRequestID}) found in 'stk_transactions' collection.`);
+        // Respond with success to M-Pesa to prevent retries of this unknown callback,
+        // but log for manual investigation.
+        return res.json({ ResultCode: 0, ResultDesc: 'No matching STK transaction record found.' });
     }
 
-    const initialSaleData = initialSalesRequestDoc.data();
+    const stkTransactionData = stkTransactionDoc.data();
+    // Get original recipient and carrier from the initial STK Push record
+    const originalRecipient = stkTransactionData.recipient;
+    const originalCarrier = stkTransactionData.carrier;
+    const originalAmountRequested = stkTransactionData.amount; // The amount initially requested for the push
+
+    // Prepare common update data for stk_transactions
+    const commonStkUpdateData = {
+        mpesaResultCode: ResultCode,
+        mpesaResultDesc: ResultDesc,
+        mpesaCallbackMetadata: CallbackMetadata, // Store full metadata
+        customerPhoneNumber: customerPhoneNumber, // From M-Pesa callback (PartyA)
+        lastUpdated: FieldValue.serverTimestamp(),
+    };
 
     // Check M-Pesa ResultCode for success
     if (ResultCode === 0) {
-        logger.info(`✅ M-Pesa payment successful for ${CheckoutRequestID}. Marking for external fulfillment.`);
+        logger.info(`✅ M-Pesa payment successful for ${CheckoutRequestID}. Updating 'stk_transactions' and notifying offline server.`);
 
-        const updatedSalesData = {
-            mpesaPaymentStatus: 'SUCCESSFUL_PENDING_EXTERNAL_FULFILLMENT', // New status
-            mpesaResultCode: ResultCode,
-            mpesaResultDesc: ResultDesc,
-            mpesaReceiptNumber: mpesaReceiptNumber,
-            mpesaTransactionDate: transactionDate,
-            customerPhoneNumber: phoneNumber,
-            amountPaid: amount,
-            mpesaCallbackMetadata: CallbackMetadata, // Store full metadata
-            lastUpdated: FieldValue.serverTimestamp(),
-        };
-
-        const updatedTransactionData = {
-            status: 'RECEIVED_PENDING_OFFLINE_FULFILLMENT', // New status for transactions collection
+        const successfulStkUpdateData = {
+            ...commonStkUpdateData,
             mpesaPaymentStatus: 'SUCCESSFUL',
-            mpesaCallbackData: callback.Body.stkCallback,
-            amountConfirmed: amount,
             mpesaReceiptNumber: mpesaReceiptNumber,
             mpesaTransactionDate: transactionDate,
-            lastUpdated: FieldValue.serverTimestamp(),
+            amountConfirmed: amount, // Amount from M-Pesa callback
+            stkPushStatus: 'MPESA_PAYMENT_SUCCESS', // Final STK transaction status on STK server
         };
 
         try {
-            await initialSalesRequestDocRef.update(updatedSalesData);
-            logger.info(`✅ Sales document ${CheckoutRequestID} updated with SUCCESSFUL_PENDING_EXTERNAL_FULFILLMENT status.`);
-
-            const transactionDocRef = transactionsCollection.doc(CheckoutRequestID);
-            await transactionDocRef.update(updatedTransactionData);
-            logger.info(`✅ Transaction document ${CheckoutRequestID} updated with status: RECEIVED_PENDING_OFFLINE_FULFILLMENT.`);
+            await stkTransactionDocRef.update(successfulStkUpdateData);
+            logger.info(`✅ STK transaction document ${CheckoutRequestID} updated with MPESA_PAYMENT_SUCCESS status.`);
 
             // --- NOTIFY OFFLINE SERVER FOR FULFILLMENT ---
+            // This payload MUST contain ALL data the offline server needs to create
+            // its 'sales' and 'transactions' documents from scratch.
             const fulfillmentDetails = {
                 checkoutRequestID: CheckoutRequestID,
                 merchantRequestID: MerchantRequestID,
                 mpesaReceiptNumber: mpesaReceiptNumber,
-                amountPaid: amount,
-                recipientNumber: initialSaleData.recipient, 
-                customerPhoneNumber: phoneNumber, 
-                carrier: initialSaleData.carrier, 
+                amountPaid: amount, // The actual amount confirmed by M-Pesa
+                recipientNumber: originalRecipient, // Retrieved from stk_transactions
+                customerPhoneNumber: customerPhoneNumber, // From M-Pesa callback
+                carrier: originalCarrier, // Retrieved from stk_transactions
+                transactionDate: transactionDate, // From M-Pesa callback
+                originalAmountRequested: originalAmountRequested, // From stk_transactions
+                stkPushInitiationPayload: stkTransactionData.stkPushPayload, // Full payload sent to Daraja
+                stkPushCallbackData: callback.Body.stkCallback, // Full M-Pesa callback payload
+                // Add any other relevant initial data from stkTransactionData if the offline server needs it
+                // e.g., customerName: stkTransactionData.customerName,
+                // serviceType: stkTransactionData.serviceType,
             };
+
             const notificationResult = await notifyOfflineServerForFulfillment(fulfillmentDetails);
 
             if (notificationResult.success) {
                 logger.info(`✅ Offline server successfully notified for fulfillment of ${CheckoutRequestID}.`);
-                await initialSalesRequestDocRef.update({
+                // Update stk_transactions with notification status
+                await stkTransactionDocRef.update({
                     offlineNotificationStatus: 'SUCCESS',
                     lastUpdated: FieldValue.serverTimestamp(),
                 });
             } else {
-                logger.error(`❌ Failed to notify offline server for ${CheckoutRequestID}. Reversal might be needed manually if fulfillment not picked up.`);
-                await initialSalesRequestDocRef.update({
+                logger.error(`❌ Failed to notify offline server for ${CheckoutRequestID}. Manual intervention might be needed for fulfillment.`);
+                // Update stk_transactions with notification failure status
+                await stkTransactionDocRef.update({
                     offlineNotificationStatus: 'FAILED',
                     offlineNotificationError: notificationResult.message,
                     lastUpdated: FieldValue.serverTimestamp(),
                 });
             }
 
-            // Respond to M-Pesa that the callback was processed
+            // Always respond to M-Pesa with ResultCode 0 to acknowledge receipt of the callback.
             return res.json({ ResultCode: 0, ResultDesc: 'Callback received and processing for external fulfillment initiated.' });
 
         } catch (updateError) {
-            logger.error(`❌ Error updating Firestore or notifying offline server for ${CheckoutRequestID}:`, { message: updateError.message, stack: updateError.stack });
+            logger.error(`❌ Error updating 'stk_transactions' or notifying offline server for ${CheckoutRequestID}:`, { message: updateError.message, stack: updateError.stack });
             await errorsCollection.add({
-                type: 'STK_CALLBACK_FIRESTORE_UPDATE_OR_NOTIFICATION_ERROR',
+                type: 'STK_CALLBACK_UPDATE_OR_NOTIFICATION_ERROR',
                 checkoutRequestID: CheckoutRequestID,
                 error: updateError.message,
                 stack: updateError.stack,
@@ -1537,28 +1556,18 @@ app.post('/stk-callback', async (req, res) => {
         // M-Pesa payment failed or was cancelled by user
         logger.warn(`⚠️ M-Pesa payment failed or cancelled for ${CheckoutRequestID}. ResultCode: ${ResultCode}, ResultDesc: ${ResultDesc}`);
 
-        const updatedSalesData = {
+        const failedStkUpdateData = {
+            ...commonStkUpdateData,
             mpesaPaymentStatus: 'FAILED_OR_CANCELLED',
-            mpesaResultCode: ResultCode,
-            mpesaResultDesc: ResultDesc,
-            customerPhoneNumber: phoneNumber,
-            mpesaCallbackMetadata: CallbackMetadata,
-            lastUpdated: FieldValue.serverTimestamp(),
-        };
-
-        const updatedTransactionData = {
-            status: 'PAYMENT_FAILED_OR_CANCELLED',
-            mpesaPaymentStatus: 'FAILED',
-            mpesaCallbackData: callback.Body.stkCallback,
-            lastUpdated: FieldValue.serverTimestamp(),
+            stkPushStatus: 'MPESA_PAYMENT_FAILED', // Final STK transaction status on STK server
         };
 
         try {
-            await initialSalesRequestDocRef.update(updatedSalesData);
-            await transactionsCollection.doc(CheckoutRequestID).update(updatedTransactionData);
-            logger.info(`✅ Sales and transaction documents updated for failed/cancelled payment for ${CheckoutRequestID}.`);
+            // Update only the stk_transactions document for failed/cancelled payments
+            await stkTransactionDocRef.update(failedStkUpdateData);
+            logger.info(`✅ STK transaction document updated for failed/cancelled payment for ${CheckoutRequestID}.`);
         } catch (error) {
-            logger.error(`❌ Error updating documents for failed/cancelled STK payment ${CheckoutRequestID}:`, { message: error.message, stack: error.stack });
+            logger.error(`❌ Error updating 'stk_transactions' for failed/cancelled STK payment ${CheckoutRequestID}:`, { message: error.message, stack: error.stack });
             await errorsCollection.add({
                 type: 'STK_CALLBACK_FAILED_PAYMENT_UPDATE_ERROR',
                 checkoutRequestID: CheckoutRequestID,
@@ -1568,7 +1577,7 @@ app.post('/stk-callback', async (req, res) => {
                 createdAt: FieldValue.serverTimestamp(),
             });
         }
-        // Always respond with success to M-Pesa even for failed payments, to acknowledge receipt of the callback.
+        // Always respond with ResultCode 0 to M-Pesa even for failed payments, to acknowledge receipt of the callback.
         return res.json({ ResultCode: 0, ResultDesc: 'Payment failed/cancelled. Callback processed.' });
     }
 });
