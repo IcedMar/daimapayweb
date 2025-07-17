@@ -80,6 +80,7 @@ app.use(bodyParser.urlencoded({ extended: true }));
 // Allow specific origins (recommended for production)
 const allowedOrigins = [
      'https://daima-pay-portal.onrender.com',
+    'https://daimapay-51406.web.app',
   'https://dpanalyticsserver.onrender.com'
 ];
 app.use(cors({
