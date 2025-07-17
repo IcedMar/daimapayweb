@@ -48,6 +48,7 @@ const reconciledTransactionsCollection = firestore.collection('reconciled_transa
 const bonusHistoryCollection = firestore.collection('bonus_history');
 const reversalTimeoutsCollection = firestore.collection('reversal_timeouts');
 const safaricomDealerConfigRef = firestore.collection('mpesa_settings').doc('main_config');
+const stkTransactionsCollection = firestore.collection('stk_transactions');
 
 // M-Pesa API Credentials from .env
 const CONSUMER_KEY = process.env.CONSUMER_KEY;
@@ -1213,40 +1214,23 @@ app.post('/stk-push', stkPushLimiter, async (req, res) => {
 
         // ONLY create the sales and transaction documents if M-Pesa successfully accepted the push request
         if (ResponseCode === '0') {
-            await salesCollection.doc(CheckoutRequestID).set({
-                saleId: CheckoutRequestID, // Store M-Pesa's CheckoutRequestID as saleId
-                initiatorPhoneNumber: cleanedCustomerPhone,
-                recipient: cleanedRecipient,
-                amount: amountFloat, // Original amount requested by customer
-                carrier: detectedCarrier,
-                mpesaResponseCode: ResponseCode,
-                mpesaResponseDescription: ResponseDescription,
-                mpesaCustomerMessage: CustomerMessage,
-                merchantRequestID: MerchantRequestID,
-                checkoutRequestID: CheckoutRequestID, // Store it explicitly
-                status: 'PENDING_MPESA_PAYMENT', // Waiting for M-Pesa payment confirmation
-                createdAt: FieldValue.serverTimestamp(),
-                lastUpdated: FieldValue.serverTimestamp(),
-                type: 'STK_PUSH_REQUEST',
-            });
-            logger.info(`✅ Sales document ${CheckoutRequestID} created with STK Push initiation response.`);
-
-            // Create initial transactions document (linked to the same CheckoutRequestID)
-            await transactionsCollection.doc(CheckoutRequestID).set({
-                transactionID: CheckoutRequestID, // Use M-Pesa's CheckoutRequestID as the main transaction ID
-                type: 'STK_PUSH_PAYMENT', // Initial type
-                initiatorPhoneNumber: cleanedCustomerPhone,
-                recipientNumber: cleanedRecipient,
-                amountRequested: amountFloat,
-                mpesaInitiationResponse: stkPushResponse.data,
-                status: 'INITIATED_STK_PUSH', // Status after successful initiation with M-Pesa
-                createdAt: FieldValue.serverTimestamp(),
-                lastUpdated: FieldValue.serverTimestamp(),
-                relatedSaleId: CheckoutRequestID, // Link to the sales document
-            });
-            logger.info(`✅ Transaction document ${CheckoutRequestID} created for STK Push initiation.`);
-
-
+            await stkTransactionsCollection.doc(CheckoutRequestID).set({
+                checkoutRequestID: CheckoutRequestID,
+                merchantRequestID: null, // Will be updated by callback
+                phoneNumber: normalizedPhoneNumber, // The number that received the STK Push
+                amount: amount,
+                recipient: recipient, // Crucial: Store the intended recipient here
+                carrier: carrier, // Assuming you detect carrier during initial request
+                initialRequestAt: FieldValue.serverTimestamp(),
+                stkPushStatus: 'PUSH_INITIATED', // Initial status
+                stkPushPayload: stkPushPayload, // Store the payload sent to Daraja
+                customerName: customerName || null,
+                serviceType: serviceType || 'airtime',
+                reference: reference || null,
+            // You can add other fields here that are specific to your STK request
+        });
+            logger.info(`✅ STK Transaction document ${CheckoutRequestID} created with STK Push initiation response.`);
+            
             return res.status(200).json({ success: true, message: CustomerMessage, checkoutRequestID: CheckoutRequestID });
 
         } else {
